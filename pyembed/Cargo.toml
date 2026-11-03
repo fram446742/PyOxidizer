@@ -38,7 +38,7 @@ serde = { version = "1.0.229", features = ["derive"], optional = true }
 [dependencies.snmalloc-sys]
 version = "0.7.6"
 default-features = false
-features = ["build_cc"]
+features = ["build_cc", "libc-api"]
 optional = true
 
 [dependencies.libmimalloc-sys]
