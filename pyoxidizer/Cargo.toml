@@ -60,7 +60,8 @@ cargolike = { path = "../cargolike" }
 cargo-lock = "11.1.0"
 cargo_toml = "1.0.1"
 cc = "1.11.0"
-clap = { version = "4.6.7", features = ["string"] }
+clap = { version = "4.6.7", features = ["env", "string"] }
+clap_complete = "4.6.11"
 codemap = "0.1.3"
 codemap-diagnostic = "0.1.2"
 dirs = "7.0.0"

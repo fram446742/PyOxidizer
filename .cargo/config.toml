@@ -1,3 +1,14 @@
 # Crank up optimization level of dependencies to speed up tests.
 [profile.dev.package."*"]
 opt-level = 3
+
+# The workspace root is a virtual manifest, so `cargo run` cannot pick a binary
+# on its own and errors listing all three. These aliases name them:
+#
+#   cargo pyo --help                       the PyOxidizer build tool
+#   cargo oxy -- run-yaml config.yaml      the self-contained Python runner
+#   cargo rel synchronize-generated-files  repository release automation
+[alias]
+pyo = ["run", "--quiet", "--bin", "pyoxidizer", "--"]
+oxy = ["run", "--quiet", "--bin", "pyoxy", "--"]
+rel = ["run", "--quiet", "--bin", "release", "--"]

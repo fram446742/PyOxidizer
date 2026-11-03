@@ -9,7 +9,9 @@ use {
         environment::{canonicalize_path, default_target_triple, Environment, PyOxidizerSource},
         licensing::{licenses_from_cargo_manifest, log_licensing_info},
         project_building::find_pyoxidizer_config_file_env,
-        project_layout::{initialize_project, write_new_pyoxidizer_config_file},
+        project_layout::{
+            initialize_project, render_standalone_python_config, write_new_pyoxidizer_config_file,
+        },
         py_packaging::{
             distribution::{
                 default_distribution_location, resolve_distribution,
@@ -34,7 +36,7 @@ use {
         collections::HashMap,
         fs::create_dir_all,
         io::{Cursor, Read},
-        path::{Path, PathBuf},
+        path::Path,
     },
 };
 
@@ -71,7 +73,7 @@ pub fn resolve_target(target: Option<&str>) -> Result<String> {
 pub fn list_targets(env: &Environment, project_path: &Path) -> Result<()> {
     let config_path = find_pyoxidizer_config_file_env(project_path).ok_or_else(|| {
         anyhow!(
-            "unable to find PyOxidizder config file at {}",
+            "unable to find PyOxidizer config file at {}",
             project_path.display()
         )
     })?;
@@ -389,13 +391,105 @@ for configuration changes to take effect.
     Ok(())
 }
 
+/// Build a self-contained Python interpreter executable.
+///
+/// This backs `pyoxidizer python`. A purpose-built configuration file is
+/// written to a temporary directory, its `install` target is built, and the
+/// resulting executable - plus the licensing documentation required to
+/// redistribute it - is copied to `dest_path`.
+#[allow(clippy::too_many_arguments)]
+pub fn build_standalone_python(
+    env: &Environment,
+    name: &str,
+    dest_path: &Path,
+    target_triple: &str,
+    flavor: &str,
+    python_version: Option<&str>,
+    release: bool,
+    verbose: bool,
+) -> Result<()> {
+    let config_source = render_standalone_python_config(name, flavor, python_version)
+        .context("rendering standalone Python interpreter configuration")?;
+
+    let temp_dir = env.temporary_directory("pyoxidizer-python")?;
+    let project_path = temp_dir.path();
+
+    let config_path = project_path.join("pyoxidizer.bzl");
+    std::fs::write(&config_path, config_source.as_bytes())
+        .context("writing generated configuration file")?;
+
+    // Keep intermediate artifacts within the temporary directory so this
+    // doesn't litter the user's current directory with a build/ tree.
+    let mut extra_vars = HashMap::new();
+    extra_vars.insert(
+        "BUILD_PATH".to_string(),
+        Some(project_path.join("build").display().to_string()),
+    );
+
+    let mut context =
+        EvaluationContextBuilder::new(env, config_path.clone(), target_triple.to_string())
+            .extra_vars(extra_vars)
+            .release(release)
+            .verbose(verbose)
+            .resolve_targets(vec!["install".to_string()])
+            .into_context()
+            .context("creating evaluation context")?;
+
+    context
+        .evaluate_file(&config_path)
+        .context("evaluating generated configuration file")?;
+
+    let resolved = context
+        .build_resolved_target("install")
+        .context("building install target")?;
+
+    // Windows executables need the extension to be runnable.
+    let exe_file_name = if cfg!(windows) {
+        format!("{}.exe", name)
+    } else {
+        name.to_string()
+    };
+
+    let source_exe = resolved.output_path.join(&exe_file_name);
+    if !source_exe.exists() {
+        return Err(anyhow!(
+            "build did not produce an executable at {}",
+            source_exe.display()
+        ));
+    }
+
+    create_dir_all(dest_path)
+        .with_context(|| format!("creating destination directory {}", dest_path.display()))?;
+
+    let dest_exe = dest_path.join(&exe_file_name);
+    std::fs::copy(&source_exe, &dest_exe)
+        .with_context(|| format!("copying executable to {}", dest_exe.display()))?;
+
+    // Licensing documentation is emitted alongside the built executable and is
+    // required when the binary is redistributed.
+    for file_name in ["COPYING.txt", "COPYING.md"] {
+        let source = resolved.output_path.join(file_name);
+        if source.exists() {
+            std::fs::copy(&source, dest_path.join(file_name)).with_context(|| {
+                format!("copying {} to {}", file_name, dest_path.display())
+            })?;
+        }
+    }
+
+    // The temporary directory is deleted when `temp_dir` is dropped, so
+    // everything the user needs has to have been copied out above.
+    println!("wrote {}", dest_exe.display());
+
+    Ok(())
+}
+
 pub fn python_distribution_extract(
     download_default: bool,
-    archive_path: Option<&str>,
-    dest_path: &str,
+    archive_path: Option<&Path>,
+    dest_path: &Path,
 ) -> Result<()> {
     let dist_path = if let Some(path) = archive_path {
-        PathBuf::from(path)
+        path.to_path_buf()
     } else if download_default {
         let location = default_distribution_location(
             &DistributionFlavor::Standalone,
@@ -403,7 +497,7 @@ pub fn python_distribution_extract(
             None,
         )?;
 
-        resolve_python_distribution_archive(&location, Path::new(dest_path))?
+        resolve_python_distribution_archive(&location, dest_path)?
     } else {
         return Err(anyhow!("do not know what distribution to operate on"));
     };
@@ -415,14 +509,14 @@ pub fn python_distribution_extract(
     let dctx = zstd::stream::Decoder::new(cursor)?;
     let mut tf = tar::Archive::new(dctx);
 
-    println!("extracting archive to {}", dest_path);
+    println!("extracting archive to {}", dest_path.display());
     tf.unpack(dest_path)?;
 
     Ok(())
 }
 
-pub fn python_distribution_info(env: &Environment, dist_path: &str) -> Result<()> {
-    let fh = std::fs::File::open(Path::new(dist_path))?;
+pub fn python_distribution_info(env: &Environment, dist_path: &Path) -> Result<()> {
+    let fh = std::fs::File::open(dist_path)?;
     let reader = std::io::BufReader::new(fh);
 
     let temp_dir = env.temporary_directory("python-distribution")?;
@@ -500,8 +594,8 @@ pub fn python_distribution_info(env: &Environment, dist_path: &str) -> Result<()
     Ok(())
 }
 
-pub fn python_distribution_licenses(env: &Environment, path: &str) -> Result<()> {
-    let fh = std::fs::File::open(Path::new(path))?;
+pub fn python_distribution_licenses(env: &Environment, path: &Path) -> Result<()> {
+    let fh = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(fh);
 
     let temp_dir = env.temporary_directory("python-distribution")?;

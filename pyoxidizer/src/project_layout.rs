@@ -54,9 +54,43 @@ static HANDLEBARS: Lazy<Handlebars<'static>> = Lazy::new(|| {
             include_str!("templates/new-pyoxidizer.bzl.hbs"),
         )
         .unwrap();
+    handlebars
+        .register_template_string(
+            "standalone-python.bzl",
+            include_str!("templates/standalone-python.bzl.hbs"),
+        )
+        .unwrap();
 
     handlebars
 });
+
+/// Settings for the `standalone-python.bzl` template.
+#[derive(Serialize)]
+struct StandalonePythonTemplateData {
+    program_name: String,
+    flavor: String,
+    python_version: Option<String>,
+}
+
+/// Render the Starlark configuration backing `pyoxidizer python`.
+///
+/// This is a purpose-built configuration that produces a self-contained
+/// Python interpreter executable. It is intentionally not something users
+/// are expected to edit - `pyoxidizer init config` is the way to get a
+/// configuration file to customize.
+pub fn render_standalone_python_config(
+    program_name: &str,
+    flavor: &str,
+    python_version: Option<&str>,
+) -> Result<String> {
+    let data = StandalonePythonTemplateData {
+        program_name: program_name.to_string(),
+        flavor: flavor.to_string(),
+        python_version: python_version.map(|x| x.to_string()),
+    };
+
+    Ok(HANDLEBARS.render("standalone-python.bzl", &data)?)
+}
 
 /// Contents of Cargo.lock file for the new Rust projects.
 const NEW_PROJECT_CARGO_LOCK: &str = include_str!("new-project-cargo.lock");
@@ -448,4 +482,52 @@ pub fn initialize_project(
     write_application_manifest(&path, name).context("writing application manifest")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn standalone_python_config_omits_unspecified_version() {
+        let rendered = render_standalone_python_config("python", "standalone", None).unwrap();
+
+        // No python_version keyword means PyOxidizer picks its default.
+        assert!(
+            rendered.contains("default_python_distribution(flavor = \"standalone\")"),
+            "{}",
+            rendered
+        );
+        assert!(!rendered.contains("python_version"));
+    }
+
+    #[test]
+    fn standalone_python_config_sets_requested_version() {
+        let rendered =
+            render_standalone_python_config("python", "standalone", Some("3.14")).unwrap();
+
+        assert!(rendered.contains("python_version = \"3.14\""), "{}", rendered);
+    }
+
+    #[test]
+    fn standalone_python_config_is_self_contained_and_python_like() {
+        let rendered = render_standalone_python_config("python3.10", "standalone", None).unwrap();
+
+        // The executable is named after what the user asked for.
+        assert!(rendered.contains("name=\"python3.10\""), "{}", rendered);
+
+        // Everything needed to behave like CPython at any -O level.
+        for expected in [
+            "policy.extension_module_filter = \"all\"",
+            "policy.include_distribution_sources = True",
+            "policy.resources_location = \"in-memory\"",
+            "policy.bytecode_optimize_level_zero = True",
+            "policy.bytecode_optimize_level_one = True",
+            "policy.bytecode_optimize_level_two = True",
+            "python_config.config_profile = \"python\"",
+            "register_target(\"install\", make_install, depends=[\"exe\"], default=True)",
+        ] {
+            assert!(rendered.contains(expected), "missing {}: {}", expected, rendered);
+        }
+    }
 }

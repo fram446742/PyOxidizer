@@ -203,7 +203,7 @@ fn main_impl() -> Result<()> {
     };
 
     let matches = Command::new("PyOxidizer Releaser")
-        .version("0.1")
+        .version(env!("CARGO_PKG_VERSION"))
         .author("Gregory Szorc <gregory.szorc@gmail.com>")
         .about("Perform releases from the PyOxidizer repository")
         .arg_required_else_help(true)
