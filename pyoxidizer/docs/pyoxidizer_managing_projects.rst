@@ -10,6 +10,89 @@ The ``pyoxidizer`` command line tool is a frontend to the various
 functionality of ``PyOxidizer``. See :ref:`components` for more
 on the various components of ``PyOxidizer``.
 
+Run ``pyoxidizer --help`` for the list of commands and ``pyoxidizer
+<command> --help`` for the arguments of a command. Install a completion
+script with ``pyoxidizer completions bash`` - or ``zsh``/``fish`` - to get
+completion for commands and flags.
+
+.. _pyoxidizer_command_layout:
+
+Command Layout
+==============
+
+Commands are grouped by what they act on:
+
+===================== ==========================================================
+Command               Purpose
+===================== ==========================================================
+``python``            Build a self-contained Python interpreter in one command.
+``build``             Build the targets defined by a project.
+``run``               Build and run a target defined by a project.
+``init config``       Create a ``pyoxidizer.bzl`` for an application.
+``init rust-project`` Create a Rust project embedding a Python interpreter.
+``dist``              Inspect, extract and license-check Python distributions.
+``inspect``           Analyze built binaries, resources, targets and licensing.
+``cache-clear``       Delete cached distributions and the managed Rust toolchain.
+``completions``       Print a shell completion script.
+===================== ==========================================================
+
+Two argument conventions are used consistently:
+
+-  ``--path <DIR>`` is the *project* directory a command operates on and
+   defaults to the current directory. Used by ``build``, ``run``, ``python``
+   and ``inspect targets``.
+-  A positional ``PATH`` is the *operand* of a command - a distribution
+   archive, a binary to analyze, a directory to create or write to - and is
+   required wherever it exists.
+
+Low-level commands that generated Rust build scripts invoke live under
+``internal`` and are hidden from ``--help``.
+
+The flat spellings that predate this grouping - ``init-config-file``,
+``python-distribution-info``, ``analyze``, ``find-resources``,
+``list-targets``, ``rust-project-licensing``, ``run-build-script`` and
+``generate-python-embedding-artifacts`` - are still accepted and behave
+identically, so existing scripts and CI jobs need no changes.
+
+.. _pyoxidizer_standalone_python:
+
+Getting a Standalone Python Interpreter
+=======================================
+
+There are two ways to obtain a single-file Python interpreter, depending on how
+much you want to control.
+
+The one-command way is ``pyoxidizer python``::
+
+   $ pyoxidizer python --dest ./out
+   $ ./out/python -c 'import sys; print(sys.version)'
+   $ ./out/python --help
+
+The produced executable embeds a Python interpreter, the entire standard
+library and all of its native extension modules. It accepts the same arguments
+as CPython's ``python`` - including ``-c``, ``-m``, script paths, ``-`` for
+stdin, ``-O`` and ``-OO``, ``--help`` and ``--version`` - and needs no Python
+installation at runtime. Use ``--python-version``, ``--flavor``,
+``--target-triple``, ``--name`` and ``--release`` to choose what is built, how
+it is named and where it is written. Licensing documentation required to
+redistribute the binary is written next to it as ``COPYING.txt``.
+
+Reach for this when you want an interpreter and nothing else.
+
+When you need to change what goes into the executable - third party packages,
+which modules are embedded, how the interpreter starts up - create a project
+instead::
+
+   $ pyoxidizer init config myapp
+   $ cd myapp
+   $ editor pyoxidizer.bzl
+   $ pyoxidizer run
+
+``pyoxidizer run`` builds and launches the default target, and
+``pyoxidizer build`` writes it under ``build/<target-triple>/<profile>/install``
+alongside its licensing documentation. See
+:ref:`packaging_creating_projects` for what a configuration file can do.
+
 .. _pyoxidizer_settings:
 
 Settings
@@ -57,28 +140,32 @@ environment variable to any value. When the *system* Rust is being used,
 ``pyoxidizer`` will automatically use the ``cargo`` executable found
 on the current search path (typically the ``PATH`` environment variable).
 
-Creating New Projects with ``init-config-file``
-===============================================
+Creating New Projects with ``init config``
+==========================================
 
-The ``pyoxidizer init-config-file`` command will create a new
+The ``pyoxidizer init config`` command will create a new
 ``pyoxidizer.bzl`` configuration file in the target directory::
 
-   $ pyoxidizer init-config-file pyapp
+   $ pyoxidizer init config pyapp
 
 This should have printed out details on what happened and what to do next.
 
-Creating New Rust Projects with ``init-rust-project``
+``init-config-file`` is still accepted and does the same thing.
+
+Creating New Rust Projects with ``init rust-project``
 =====================================================
 
-The ``pyoxidizer init-rust-project`` command creates a minimal
+The ``pyoxidizer init rust-project`` command creates a minimal
 Rust project configured to build an application that runs an
 embedded Python interpreter from a configuration defined in a
 ``pyoxidizer.bzl`` configuration file. Run it by specifying the
 directory to contain the new project::
 
-   $ pyoxidizer init-rust-project pyapp
+   $ pyoxidizer init rust-project pyapp
 
 This should have printed out details on what happened and what to do next.
+
+``init-rust-project`` is still accepted and does the same thing.
 
 The explicit creation of Rust projects to use ``PyOxidizer`` is not
 required. If your produced binaries only need to perform actions
@@ -132,16 +219,16 @@ by *running* the returned object. e.g.::
    # Run the "install" target.
    $ pyoxidizer run --target install
 
-Analyzing Produced Binaries with ``analyze``
-============================================
+Analyzing Produced Binaries with ``inspect binary``
+===================================================
 
-The ``pyoxidizer analyze`` command is a generic command for analyzing the
+The ``pyoxidizer inspect binary`` command is a generic command for analyzing the
 contents of executables and libraries. While it is generic, its output is
 specifically tailored for ``PyOxidizer``.
 
 Run the command with the path to an executable. For example::
 
-   $ pyoxidizer analyze build/apps/myapp/x86_64-unknown-linux-gnu/debug/myapp
+   $ pyoxidizer inspect binary build/apps/myapp/x86_64-unknown-linux-gnu/debug/myapp
 
 Behavior is dependent on the format of the file being analyzed. But the
 general theme is that the command attempts to identify the run-time
@@ -152,11 +239,11 @@ is compatible with.
 
 .. note::
 
-   ``pyoxidizer analyze`` is not yet implemented for all executable
+   ``pyoxidizer inspect binary`` is not yet implemented for all executable
    file types that ``PyOxidizer`` supports.
 
-Inspecting Python Distributions
-===============================
+Inspecting Python Distributions with ``dist``
+=============================================
 
 ``PyOxidizer`` uses special pre-built Python distributions to build
 binaries containing Python.
@@ -170,14 +257,14 @@ and has
 on his blog. You should read that blog post so you are enlightened on
 how amazing zstandard is.) But because zstandard is relatively new, not
 all systems have utilities for decompressing that format yet. So, the
-``pyoxidizer python-distribution-extract`` command can be used to extract
+``pyoxidizer dist extract`` command can be used to extract
 the zstandard compressed tar archive to a local filesystem path.
 
 Python distributions contain software governed by a number of licenses.
 This of course has implications for application distribution. See
 :ref:`licensing_considerations` for more.
 
-The ``pyoxidizer python-distribution-licenses`` command can be used to
+The ``pyoxidizer dist licenses`` command can be used to
 inspect a Python distribution archive for information about its licenses.
 The command will print information about the licensing of the Python
 distribution itself along with a per-extension breakdown of which
@@ -211,10 +298,10 @@ are governed by the X11, and GPL-3.0 licenses::
 
 .. _cli_find_resources:
 
-Debugging Resource Scanning and Identification with ``find-resources``
-======================================================================
+Debugging Resource Scanning and Identification with ``inspect resources``
+=========================================================================
 
-The ``pyoxidizer find-resources`` command can be used to scan for
+The ``pyoxidizer inspect resources`` command can be used to scan for
 resources in a given source and then print information on what's found.
 
 PyOxidizer's packaging functionality scans directories and files and
@@ -230,13 +317,13 @@ in Python and because there are many subtle nuances with how files
 are classified, there can be bugs in PyOxidizer's resource scanning
 code.
 
-The ``pyoxidizer find-resources`` command exists to facilitate
+The ``pyoxidizer inspect resources`` command exists to facilitate
 debugging PyOxidizer's resource scanning code.
 
 Simply give the command a path to a directory or Python wheel archive
 and it will tell you what it discovers. e.g.::
 
-   $ pyoxidizer find-resources dist/oxidized_importer-0.1-cp39-cp39-manylinux2014_x86_64.whl
+   $ pyoxidizer inspect resources dist/oxidized_importer-0.1-cp39-cp39-manylinux2014_x86_64.whl
    parsing dist/oxidized_importer-0.1-cp39-cp39-manylinux2014_x86_64.whl as a wheel archive
    PythonExtensionModule { name: oxidized_importer }
    PythonPackageDistributionResource { package: oxidized-importer, version: 0.1, name: LICENSE }
@@ -247,7 +334,7 @@ and it will tell you what it discovers. e.g.::
 
 Or give it the path to a ``site-packages`` directory::
 
-   $ pyoxidizer find-resources ~/.pyenv/versions/3.9.21/lib/python3.9/site-packages
+   $ pyoxidizer inspect resources ~/.pyenv/versions/3.9.21/lib/python3.9/site-packages
    ...
 
 This command needs to use a Python distribution so it knows what file
@@ -257,7 +344,7 @@ download one of the
 compatible with the current machine and use that. You can specify a
 ``--distributions-dir`` to use to cache downloaded distributions::
 
-   $ pyoxidizer find-resources --distributions-dir distributions /usr/lib/python3.9
+   $ pyoxidizer inspect resources --distributions-dir distributions /usr/lib/python3.9
    ...
 
 .. _pyoxidizer_cli_extra_starlark_variables:

@@ -179,14 +179,16 @@ Or by cloning the canonical Git repository and building the project locally::
 Once the ``pyoxidizer`` executable is installed, try to run it::
 
    $ pyoxidizer
-   PyOxidizer 0.14.0-pre
-   Gregory Szorc <gregory.szorc@gmail.com>
-   Build and distribute Python applications
+   Usage: pyoxidizer [OPTIONS] [COMMAND]
 
-   USAGE:
-       pyoxidizer [FLAGS] [SUBCOMMAND]
-
-   ...
+   Commands:
+     build        Build a PyOxidizer project
+     run          Build and run a target in a configuration file
+     python       Build a standalone, self-contained Python interpreter
+     init         Create a new project
+     dist         Inspect and extract Python distributions
+     inspect      Analyze binaries, resources, targets and licensing
+     ...
 
 Congratulations, PyOxidizer is installed! Now let's move on to using it.
 
@@ -197,7 +199,7 @@ High-Level Project Lifecycle
 of ``pyoxidizer`` commands and configuration files.
 
 The first step of any project is to create it. This is achieved
-with a ``pyoxidizer init-*`` command to create files required by
+with an ``pyoxidizer init`` command to create files required by
 ``PyOxidizer``.
 
 After that, various ``pyoxidizer`` commands can be used to evaluate
@@ -205,20 +207,41 @@ configuration files and perform actions from the evaluated file.
 ``PyOxidizer`` provides functionality for building binaries, installing
 files into a directory tree, and running the results of build actions.
 
+A Standalone Python Interpreter
+===============================
+
+If you just want an executable that is a Python interpreter - no project, no
+configuration file - there is a command for that::
+
+   $ pyoxidizer python --dest ./out
+   $ ./out/python -c 'import sys; print(sys.version)'
+
+The resulting ``python`` executable embeds a Python interpreter and the entire
+standard library, accepts the same arguments as CPython - ``-c``, ``-m``,
+script paths, ``-`` for stdin, ``-O``, ``-OO``, ``--help`` - and requires no
+Python installation to run. ``--python-version``, ``--flavor``,
+``--target-triple``, ``--name`` and ``--release`` control what is built and
+where it goes.
+
+The rest of this document covers projects, which is what you want when the
+binary should also carry your own Python packages or behave differently from a
+plain interpreter. See :ref:`pyoxidizer_standalone_python` for how this
+compares to building a project.
+
 Your First PyOxidizer Project
 =============================
 
-The ``pyoxidizer init-config-file`` command will create a new PyOxidizer
+The ``pyoxidizer init config`` command will create a new PyOxidizer
 configuration file in a directory of your choosing::
 
-   $ pyoxidizer init-config-file pyapp
+   $ pyoxidizer init config pyapp
 
 This should have printed out details on what happened and what to do next.
 If you actually ran this in a terminal, hopefully you don't need to continue
 following the directions here as the printed instructions are sufficient!
 But if you aren't, keep reading.
 
-The default configuration created by ``pyoxidizer init-config-file`` will
+The default configuration created by ``pyoxidizer init config`` will
 produce an executable that embeds Python and starts a Python REPL by default.
 Let's test that::
 

@@ -26,9 +26,9 @@ the executable can be copied between Linux machines and it will *just work*.
 Building such binaries requires using the ``x86_64-unknown-linux-musl``
 Rust toolchain target. Using ``pyoxidizer``::
 
-   $ pyoxidizer build --target x86_64-unknown-linux-musl
+   $ pyoxidizer build --target-triple x86_64-unknown-linux-musl
 
-Specifying ``--target x86_64-unknown-linux-musl`` will cause PyOxidizer
+Specifying ``--target-triple x86_64-unknown-linux-musl`` will cause PyOxidizer
 to use a Python distribution built against
 `musl libc <https://www.musl-libc.org/>`_ as well as tell Rust to target
 *musl on Linux*.
@@ -66,7 +66,7 @@ PyOxidizer!
 
 Once Rust's musl target is installed, you can build away::
 
-   $ pyoxidizer build --target x86_64-unknown-linux-musl
+   $ pyoxidizer build --target-triple x86_64-unknown-linux-musl
    $ ldd build/apps/myapp/x86_64-unknown-linux-musl/debug/myapp
         not a dynamic executable
 

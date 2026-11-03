@@ -27,6 +27,53 @@ tar_command := if os() == "macos" {
   "tar"
 }
 
+# Rust target triple for the machine running these recipes. Mirrors
+# pyoxidizer's own default target resolution.
+default_triple := if os() == "macos" {
+  if arch() == "arm" { "aarch64-apple-darwin" } else { "x86_64-apple-darwin" }
+} else if os() == "windows" {
+  "x86_64-pc-windows-msvc"
+} else {
+  if arch() == "arm" { "aarch64-unknown-linux-gnu" } else { "x86_64-unknown-linux-gnu" }
+}
+
+# Build a self-contained Python interpreter into dist/python/.
+#
+# The result accepts the same arguments as CPython's `python` and needs no
+# Python installation. Pass python_version to choose the interpreter version,
+# e.g. `just python 3.14`.
+python python_version="":
+  #!/usr/bin/env bash
+  set -eo pipefail
+
+  args=()
+  if [ -n "{{python_version}}" ]; then
+    args+=(--python-version "{{python_version}}")
+  fi
+
+  cargo run --release --quiet --bin pyoxidizer -- python --dest dist/python "${args[@]}"
+  ls -lh dist/python/
+
+# Build the pyoxy runner and copy it to ./python.
+#
+# pyoxy is the shipped runner: besides behaving like `python` when its file
+# name begins with `python`, it can run interpreter configurations declared in
+# YAML and act as a script interpreter via shebang.
+#
+# The artifact is copied, not symlinked: pyoxy decides to masquerade by
+# inspecting current_exe(), which on Linux resolves symlinks, so a symlink
+# named python would report the real pyoxy path and parse its own arguments.
+pyoxy-python triple=default_triple python_version="3.10":
+  #!/usr/bin/env bash
+  set -eo pipefail
+
+  cargo run --release --quiet --bin pyoxidizer -- build --release --path pyoxy \
+    --target-triple {{triple}} --var PYTHON_VERSION {{python_version}}
+  PYO3_CONFIG_FILE=$(pwd)/pyoxy/build/{{triple}}/release/resources/pyo3-build-config-file.txt \
+    cargo build --release --bin pyoxy --target {{triple}}
+  cp target/{{triple}}/release/pyoxy ./python
+  ./python -V
+
 # Name of the repository section in ~/.pypirc that PyOxidizer wheels are
 # uploaded to. This fork is not published on pypi.org.
 pypi_repository := env_var_or_default("PYOXIDIZER_PYPI_REPOSITORY", "collmot")

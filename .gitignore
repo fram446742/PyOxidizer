@@ -7,6 +7,9 @@ docs/pyembed*
 docs/pyoxidizer*
 docs/pyoxy*
 docs/tugger*
+# Output of `just python` and `just pyoxy-python`.
+/python
+dist/
 pyembed/docs/_build/
 python-oxidized-importer/docs/_build/
 target/

@@ -37,9 +37,13 @@ The documentation around how to hack on the PyOxidizer codebase is a bit
 lacking. Sorry for that!
 
 The most important command for contributors to know how to run is
-``cargo run --bin pyoxidizer``. This will compile the ``pyoxidizer`` executable
-program and run it. Use it like ``cargo run --bin pyoxidizer -- init
-~/tmp/myapp`` to run ``pyoxidizer init ~/tmp/myapp`` for example.
+``cargo pyo``. This will compile the ``pyoxidizer`` executable
+program and run it. Use it like ``cargo pyo -- init rust-project
+~/tmp/myapp`` to run ``pyoxidizer init rust-project ~/tmp/myapp`` for
+example. (``cargo pyo`` is an alias defined in the repository's
+``.cargo/config.toml`` for ``cargo run --bin pyoxidizer --``, which you can
+also type directly. The equivalents for the other workspace executables are
+``cargo oxy`` and ``cargo rel``.)
 
 The ``Cargo.toml`` in the root of the repository defines a Cargo workspace
 containing many crates.
