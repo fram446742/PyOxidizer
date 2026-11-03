@@ -5,9 +5,9 @@
 /*! Functionality for running from a YAML file. */
 
 use {
-    crate::interpreter::Config,
+    crate::interpreter::{run_interpreter, Config},
     anyhow::{anyhow, Context, Result},
-    pyembed::MainPythonInterpreter,
+    pyembed::OxidizedPythonInterpreterConfig,
     std::{
         ffi::{OsStr, OsString},
         fs::File,
@@ -21,9 +21,9 @@ use {
 /// The YAML will be parsed to an [OxidizedPythonInterpreterConfig]. Unless
 /// the fields `exe` or `argv` are set, the provided values will be used.
 ///
-/// A [MainPythonInterpreter] will be spawned from the [OxidizedPythonInterpreterConfig].
-/// It will then run whatever it is configured to run and finalize. The function
-/// returns an exit code.
+/// An interpreter is spawned from the [OxidizedPythonInterpreterConfig] via
+/// [run_interpreter()]. It will then run whatever it is configured to run and
+/// finalize. The function returns an exit code.
 ///
 /// If the interpreter raises a Python exception, this will be handled by
 /// Python and it will not materialize as an `Err`.
@@ -49,9 +49,9 @@ where
         );
     }
 
-    let interp =
-        MainPythonInterpreter::new(config.into()).context("initializing Python interpreter")?;
-    Ok(interp.run())
+    let config: OxidizedPythonInterpreterConfig = config.into();
+
+    run_interpreter(config)
 }
 
 enum ParserState {

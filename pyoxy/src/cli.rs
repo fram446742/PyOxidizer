@@ -32,6 +32,20 @@ fn run_normal(exe: &Path) -> Result<i32> {
     let app = Command::new("pyoxy")
         .version(PYOXY_VERSION)
         .author("Gregory Szorc <gregory.szorc@gmail.com>")
+        .about("Run self-contained Python interpreters")
+        .long_about(
+            "\
+Run a self-contained Python interpreter.
+
+The interpreter, its standard library and all of its native extension
+modules are embedded in this executable, which therefore requires no
+Python installation.
+
+Renaming or symlinking this executable to a name beginning with `python`
+makes it behave like a plain CPython interpreter and forwards every
+argument to it, which is what `run-python` does explicitly.
+",
+        )
         .arg_required_else_help(true);
 
     let app = app.subcommand(
@@ -56,6 +70,7 @@ fn run_normal(exe: &Path) -> Result<i32> {
                     .value_name("FILE")
                     .action(ArgAction::Set)
                     .value_parser(value_parser!(PathBuf))
+                    .required(true)
                     .help("Path to YAML file to evaluate"),
             )
             .arg(

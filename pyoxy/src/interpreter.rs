@@ -3,7 +3,7 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 use {
-    anyhow::{Context, Result},
+    anyhow::Result,
     pyembed::{MainPythonInterpreter, OxidizedPythonInterpreterConfig, PackedResourcesSource},
     serde::{Deserialize, Serialize},
     std::{
@@ -78,6 +78,33 @@ impl<'a> Config<'a> {
     }
 }
 
+/// Construct and run an embedded Python interpreter.
+///
+/// CPython declines to initialize for some command line arguments - notably
+/// `--help` and `--version` - and requests a clean process exit instead. That
+/// arrives as an error carrying an exit code rather than a message, so surface
+/// it as a normal return value and let the caller exit with that code.
+pub fn run_interpreter(config: OxidizedPythonInterpreterConfig) -> Result<i32> {
+    let interp = match MainPythonInterpreter::new(config) {
+        Ok(interp) => interp,
+        Err(err) => {
+            let Some(code) = err.exit_code() else {
+                return Err(anyhow::Error::new(err).context("initializing Python interpreter"));
+            };
+
+            // The interpreter never finished starting, so nothing flushed the
+            // streams for us. `--help` writes to stdout, which would otherwise
+            // be lost.
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+            let _ = std::io::Write::flush(&mut std::io::stderr());
+
+            return Ok(code);
+        }
+    };
+
+    Ok(interp.run())
+}
+
 /// Runs an embedded Python interpreter in `python` mode.
 pub fn run_python<T>(exe: &Path, args: &[T]) -> Result<i32>
 where
@@ -93,7 +120,7 @@ where
             .collect::<Vec<_>>(),
     );
 
-    let interp =
-        MainPythonInterpreter::new(config.into()).context("initializing Python interpreter")?;
-    Ok(interp.run())
+    let config: OxidizedPythonInterpreterConfig = config.into();
+
+    run_interpreter(config)
 }
