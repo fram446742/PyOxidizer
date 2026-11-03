@@ -84,13 +84,12 @@ impl From<FileBasedCodeSigningCertificate> for CodeSigningCertificate {
 pub fn create_self_signed_code_signing_certificate_params(
     subject_name: &str,
 ) -> rcgen::CertificateParams {
-    let mut params = rcgen::CertificateParams::new(vec![]);
-    params.alg = &rcgen::PKCS_ECDSA_P256_SHA256;
+    let mut params = rcgen::CertificateParams::default();
     params.key_identifier_method = rcgen::KeyIdMethod::Sha256;
     params.distinguished_name = rcgen::DistinguishedName::new();
     params
         .subject_alt_names
-        .push(rcgen::SanType::DnsName(subject_name.to_string()));
+        .push(rcgen::SanType::DnsName(subject_name.to_string().try_into().unwrap()));
     params
         .distinguished_name
         .push(rcgen::DnType::CommonName, subject_name);
@@ -114,22 +113,24 @@ pub fn create_self_signed_code_signing_certificate_params(
 
 pub fn create_self_signed_code_signing_certificate(
     subject_name: &str,
-) -> std::result::Result<rcgen::Certificate, rcgen::Error> {
+) -> std::result::Result<rcgen::CertifiedKey<rcgen::KeyPair>, rcgen::Error> {
     let params = create_self_signed_code_signing_certificate_params(subject_name);
+    let signing_key = rcgen::KeyPair::generate()?;
+    let cert = params.self_signed(&signing_key)?;
 
-    rcgen::Certificate::from_params(params)
+    Ok(rcgen::CertifiedKey { cert, signing_key })
 }
 
 /// Serialize a certificate to a PKCS #12 `.pfx` file.
 ///
 /// This file format is what is used by `signtool` and other Microsoft tools.
 pub fn certificate_to_pfx(
-    cert: &rcgen::Certificate,
+    cert: &rcgen::CertifiedKey<rcgen::KeyPair>,
     password: &str,
     name: &str,
 ) -> Result<Vec<u8>> {
-    let cert_der = cert.serialize_der()?;
-    let key_der = cert.serialize_private_key_der();
+    let cert_der = cert.cert.der().as_ref().to_vec();
+    let key_der = cert.signing_key.serialize_der();
 
     let pfx = p12::PFX::new(&cert_der, &key_der, None, password, name)
         .ok_or_else(|| anyhow!("unable to convert to pfx"))?;
@@ -221,7 +222,7 @@ mod tests {
         rcgen::KeyPair::from_pem(POWERSHELL_CERTIFICATE_PRIVATE_PEM)?;
 
         let cert = create_self_signed_code_signing_certificate("testing@example.com")?;
-        let cert_der = cert.serialize_der()?;
+        let cert_der = cert.cert.der().as_ref().to_vec();
 
         let generated = x509_parser::parse_x509_certificate(&cert_der)?.1;
 

@@ -21,7 +21,7 @@ use {
     python_packaging::licensing::{
         ComponentFlavor, LicenseFlavor, LicensedComponent, LicensedComponents, SourceLocation,
     },
-    std::{path::Path, sync::Arc},
+    std::path::Path,
 };
 
 /// Log a summary of licensing info.
@@ -129,12 +129,10 @@ pub fn licenses_from_cargo_manifest<'a>(
     // Simulate a cargo build from the current platform targeting a specified platform or the current.
     let mut cargo_options = CargoOptions::new();
     cargo_options.set_resolver(CargoResolverVersion::V2);
-    cargo_options.set_host_platform(PlatformSpec::Platform(Arc::new(Platform::build_target()?)));
+    cargo_options.set_host_platform(PlatformSpec::build_target()?);
     cargo_options.set_target_platform(if let Some(triple) = target_triple {
-        PlatformSpec::Platform(Arc::new(Platform::from_triple(
-            Triple::new(triple.into())?,
-            TargetFeatures::Unknown,
-        )))
+        let triple = Triple::new(triple.into())?;
+        PlatformSpec::from(Platform::from_triple(triple, TargetFeatures::Unknown))
     } else {
         PlatformSpec::build_target()?
     });

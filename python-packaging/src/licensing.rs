@@ -351,11 +351,11 @@ impl LicensedComponent {
         match &self.license {
             LicenseFlavor::Spdx(expression) => expression
                 .requirements()
-                .map(|req| (req.req.license.id().unwrap(), req.req.exception))
+                .map(|req| (req.req.license.id().unwrap(), req.req.addition.as_ref().and_then(|a| a.id())))
                 .collect::<BTreeSet<_>>(),
             LicenseFlavor::OtherExpression(expression) => expression
                 .requirements()
-                .filter_map(|req| req.req.license.id().map(|id| (id, req.req.exception)))
+                .filter_map(|req| req.req.license.id().map(|id| (id, req.req.addition.as_ref().and_then(|a| a.id()))))
                 .collect::<BTreeSet<_>>(),
             LicenseFlavor::None | LicenseFlavor::PublicDomain | LicenseFlavor::Unknown(_) => {
                 BTreeSet::new()
@@ -941,7 +941,7 @@ impl TryInto<LicensedComponent> for PackageLicenseInfo {
                     spdx_license_ids.insert(format!("({})", s));
                 } else if let Some(name) = spdx::identifiers::LICENSES
                     .iter()
-                    .find_map(|(name, full, _)| if &s == full { Some(name) } else { None })
+                    .find_map(|lic| if &s == lic.full_name { Some(lic.name) } else { None })
                 {
                     spdx_license_ids.insert(name.to_string());
                 } else {
