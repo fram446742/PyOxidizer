@@ -25,7 +25,6 @@ use {
         collections::BTreeSet,
         ffi::OsStr,
         fs::{self, create_dir_all},
-        hash::Hasher,
         io::{BufRead, BufReader, Cursor},
         path::{Path, PathBuf},
     },
@@ -256,44 +255,6 @@ pub fn link_libpython(
     let config_c_source = make_config_c(&context.init_functions.iter().collect::<Vec<_>>());
     let config_c_path = config_c_dir.join("config.c");
 
-    // The output file name is dependent on whether the input file name is absolute.
-    let config_object_path = if config_c_path.has_root() {
-        let dirname = config_c_path
-            .parent()
-            .ok_or_else(|| anyhow!("could not determine parent directory"))?;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-
-        // The code below is copied from cc@v1.2.2, and it needs to be updated
-        // whenever cc decides to change its behaviour regarding the generated
-        // hashes in the compiled object files.
-        //
-        // In the future we should probably avoid this and rely on
-        // compile_intermediates() of the Build object to retrieve the final
-        // filename.
-
-        // Make the dirname relative (if possible) to avoid full system paths influencing the sha
-        // and making the output system-dependent
-        //
-        // NOTE: Here we allow using std::env::var (instead of Build::getenv) because
-        // CARGO_* variables always trigger a rebuild when changed
-        #[allow(clippy::disallowed_methods)]
-        let dirname = if let Some(root) = std::env::var_os("CARGO_MANIFEST_DIR") {
-            let root = root.to_string_lossy();
-            dirname.strip_prefix(&*root).unwrap_or(&dirname)
-        } else {
-            dirname
-        };
-
-        hasher.write(dirname.to_string_lossy().as_bytes());
-        if let Some(extension) = config_c_path.extension() {
-            hasher.write(extension.to_string_lossy().as_bytes());
-        }
-
-        config_c_dir.join(format!("{:016x}-{}", hasher.finish(), "config.o"))
-    } else {
-        config_c_dir.join("config.o")
-    };
-
     fs::write(&config_c_path, config_c_source.as_bytes())?;
 
     // Gather all includes into the temporary directory.
@@ -339,15 +300,22 @@ pub fn link_libpython(
         .opt_level_str(opt_level)
         .file(&config_c_path)
         .include(&config_c_dir)
-        .cargo_metadata(false)
-        .compile("irrelevant");
+        .cargo_metadata(false);
 
-    with_verbose_shell(|log| log.status("Resolving", "inputs for custom Python library"))?;
+    // Compile to intermediate objects rather than calling compile() ourselves:
+    // the object file name is derived by the `cc` crate using a scheme that
+    // varies between `cc` versions, so predicting it is brittle. Asking for the
+    // intermediates gives us the actual path. We added exactly one source file,
+    // so there is exactly one object.
+    let mut config_objects = build.compile_intermediates();
+    let config_object_path = config_objects
+        .pop()
+        .ok_or_else(|| anyhow!("compiling config.c produced no object files"))?;
 
     let mut objects = BTreeSet::new();
-
-    // Link our custom config.c's object file.
     objects.insert(config_object_path);
+
+    with_verbose_shell(|log| log.status("Resolving", "inputs for custom Python library"))?;
 
     for (i, location) in context.object_files.iter().enumerate() {
         match location {

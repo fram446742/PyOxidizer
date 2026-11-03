@@ -310,9 +310,24 @@ pub fn init_config_file(
         create_dir_all(project_dir)?;
     }
 
-    let name = project_dir.iter().last().unwrap().to_str().unwrap();
+    // Derive the project name from the directory. `Path::iter()` on relative
+    // paths such as `.` yields that literal component, which would become the
+    // name of the produced executable. Resolve to an absolute path first.
+    let name = project_dir
+        .canonicalize()
+        .context("canonicalizing project directory")?
+        .file_name()
+        .ok_or_else(|| {
+            anyhow!(
+                "could not determine project name from {}",
+                project_dir.display()
+            )
+        })?
+        .to_str()
+        .ok_or_else(|| anyhow!("project directory is not valid UTF-8"))?
+        .to_string();
 
-    write_new_pyoxidizer_config_file(source, project_dir, name, code, pip_install)?;
+    write_new_pyoxidizer_config_file(source, project_dir, &name, code, pip_install)?;
 
     println!();
     println!("A new PyOxidizer configuration file has been created.");

@@ -54,8 +54,20 @@ fn main() {
                 interp.run()
             }
             Err(msg) => {
-                eprintln!("error instantiating embedded Python interpreter: {}", msg);
-                1
+                // CPython declines to initialize the interpreter for some command
+                // line arguments - e.g. `--help` - and requests an exit instead.
+                // Honor that rather than reporting it as a failure.
+                match msg.exit_code() {
+                    Some(code) => {
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                        let _ = std::io::Write::flush(&mut std::io::stderr());
+                        code
+                    }
+                    None => {
+                        eprintln!("error instantiating embedded Python interpreter: {}", msg);
+                        1
+                    }
+                }
             }
         }
     };
