@@ -10,6 +10,16 @@ use {
 };
 
 fn run() -> Result<()> {
+    // By default the executable is a `python`: its arguments are the
+    // interpreter's arguments, no subcommand required.
+    Command::cargo_bin("pyoxy")?
+        .arg("-c")
+        .arg("print('hello, world')")
+        .assert()
+        .success()
+        .stdout(predicate::eq("hello, world\n").normalize());
+
+    // The deprecated `run-python` spelling of the same behavior still works.
     Command::cargo_bin("pyoxy")?
         .arg("run-python")
         .arg("--")
@@ -19,7 +29,8 @@ fn run() -> Result<()> {
         .success()
         .stdout(predicate::eq("hello, world\n").normalize());
 
-    // If the executable is named `python` it behaves like `python`.
+    // No executable name opts out: `python`, `python3`, `python3.10` and
+    // unrecognized names all behave like `python`.
     for bin_name in ["python", "python3", "python3.10", "pythonfoo"] {
         let td = tempfile::Builder::new().prefix("pyoxy-test-").tempdir()?;
 

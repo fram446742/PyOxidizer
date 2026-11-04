@@ -17,6 +17,14 @@ Changelog
 
 Not yet released.
 
+* ``pyoxy`` now behaves like a ``python`` executable by default: the process
+  arguments are handed to the embedded Python interpreter, with no subcommand
+  and no special file name required. Runner features are exposed as long
+  options ``python`` does not define: ``--yaml FILE`` runs a YAML-configured
+  interpreter (replacing the ``run-yaml`` subcommand) and ``--runner-help``
+  documents them, since ``-h``/``--help`` now belong to the interpreter.
+  The ``run-python`` and ``run-yaml`` subcommands are deprecated spellings of
+  the default behavior and ``--yaml`` respectively and are still accepted.
 * Official release artifacts now contain Python 3.10, 3.11, 3.12, 3.13 and
   3.14 variants. The Python 3.9 variant is no longer provided, as
   PyOxidizer dropped support for Python 3.9.

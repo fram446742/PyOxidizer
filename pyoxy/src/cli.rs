@@ -4,8 +4,8 @@
 
 use {
     crate::{interpreter::run_python, yaml::run_yaml_path},
-    anyhow::{anyhow, Context, Result},
-    clap::{value_parser, Arg, ArgAction, Command},
+    anyhow::{Context, Result},
+    clap::Command,
     std::{
         ffi::OsString,
         path::{Path, PathBuf},
@@ -14,98 +14,182 @@ use {
 
 const PYOXY_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub fn run() -> Result<i32> {
-    let exe = std::env::current_exe().context("resolving current executable")?;
+/// Prints the runner's own help.
+///
+/// Python's `-h`/`--help`/`-?` belong to the interpreter, so the runner's
+/// features are reachable through a long option Python does not define. That
+/// also means a runner option can never be mistaken for a program name.
+const HELP_OPTION: &str = "--runner-help";
 
-    // If the current executable looks like `python`, we effectively dispatch to
-    // `pyoxy run-python -- <args>`.
-    if let Some(stem) = exe.file_stem() {
-        if stem.to_string_lossy().starts_with("python") {
-            return run_python(&exe, &std::env::args_os().skip(1).collect::<Vec<_>>());
-        }
+/// Runs an interpreter configured by a YAML file.
+const YAML_OPTION: &str = "--yaml";
+const YAML_OPTION_PREFIX: &str = "--yaml=";
+
+/// Superseded spellings, still accepted.
+const LEGACY_RUN_PYTHON: &str = "run-python";
+const LEGACY_RUN_YAML: &str = "run-yaml";
+
+const RUNNER_HELP: &str = "\
+A self-contained Python interpreter.
+
+The interpreter, its standard library and all of its native extension modules
+are embedded in this executable, so no Python installation is required.
+
+By default this executable is a `python` executable. Every argument is handed to
+the interpreter: -c, -m, a script path, `-` for stdin, -O, -OO, -B, -E, -s, -X,
+-W, -V, --version, --help and the rest, with the documented exit codes. With no
+arguments at all it starts a REPL. Renaming the executable to `python`,
+`python3` or anything else changes nothing; the runner options below reach the
+non-interpreter behavior under any name.
+
+Runner features:
+
+  --yaml FILE [args...]
+      Run an interpreter configured by a YAML file rather than the default
+      configuration. See the pyoxy documentation for the schema. This also
+      makes pyoxy usable as a script interpreter:
+
+          #!/usr/bin/env -S pyoxy --yaml
+
+  pyoxy-modules/
+      Optional directory next to this executable. Every `*.packed-resources`
+      file in it is imported like a built-in library. `pyoxidizer package`
+      produces these files, one per Python package:
+
+          $ pyoxidizer package --dest pyoxy-modules requests lxml
+          $ cp requests.packed-resources pyoxy-modules/
+
+      Copy a file to add a library, delete it to remove one. `--yaml` configs
+      can also list additional resources of their own via `packed_resources`.
+
+  --runner-help
+      Print this message. -h and --help print the interpreter's usage instead,
+      because they are the interpreter's arguments.
+
+  run-yaml FILE -- [args...]
+      Deprecated spelling of --yaml, still accepted.
+
+  run-python -- [args...]
+      Deprecated spelling of the default behavior, still accepted.
+
+Note that sys.argv[0] and the interpreter's usage line report this executable's
+own path, so `pyoxy --help` prints `usage: /path/to/pyoxy [option] ...` where
+`python3 --help` prints `usage: python3 [option] ...`. Install it under the name
+you want reported.
+";
+
+/// Remove the runner's own leading argument, returning the YAML file when the
+/// `--yaml` form was used.
+///
+/// Only the first argument is considered, so everything after it - including
+/// another `--yaml` - belongs to the interpreter.
+fn take_runner_option(args: &mut Vec<OsString>) -> RunnerOption {
+    let Some(first) = args.first() else {
+        return RunnerOption::None;
+    };
+
+    let first = first.to_string_lossy().to_string();
+
+    if first == HELP_OPTION {
+        args.remove(0);
+        return RunnerOption::Help;
     }
 
-    run_normal(&exe)
+    if let Some(rest) = first.strip_prefix(YAML_OPTION_PREFIX) {
+        args.remove(0);
+        return RunnerOption::Yaml(PathBuf::from(rest));
+    }
+
+    if first == YAML_OPTION {
+        args.remove(0);
+
+        return match args.first() {
+            Some(path) => {
+                let path = PathBuf::from(path.as_os_str());
+                args.remove(0);
+                RunnerOption::Yaml(path)
+            }
+            None => RunnerOption::MissingYamlPath,
+        };
+    }
+
+    RunnerOption::None
 }
 
-fn run_normal(exe: &Path) -> Result<i32> {
-    let app = Command::new("pyoxy")
+enum RunnerOption {
+    /// No runner argument was given: behave like `python`.
+    None,
+    Help,
+    Yaml(PathBuf),
+    /// `--yaml` was given without the file it needs.
+    MissingYamlPath,
+}
+
+/// Strip a `--` argument separator, as used by the deprecated subcommands.
+fn strip_separator(args: &mut Vec<OsString>) {
+    if args.first().map(|x| x.as_os_str() == "--").unwrap_or(false) {
+        args.remove(0);
+    }
+}
+
+fn print_runner_help() -> i32 {
+    let mut app = Command::new("pyoxy")
         .version(PYOXY_VERSION)
         .author("Gregory Szorc <gregory.szorc@gmail.com>")
-        .about("Run self-contained Python interpreters")
-        .long_about(
-            "\
-Run a self-contained Python interpreter.
+        .disable_help_flag(true)
+        .disable_version_flag(true)
+        .override_usage("  pyoxy [python arguments...]")
+        .about("Run a self-contained Python interpreter")
+        .long_about(RUNNER_HELP);
 
-The interpreter, its standard library and all of its native extension
-modules are embedded in this executable, which therefore requires no
-Python installation.
+    // print_long_help() writes to stdout and renders long_about (print_help()
+    // would print only the one-line about). Its errors are not actionable
+    // here: there is nothing to do if the terminal goes away.
+    let _ = app.print_long_help();
 
-Renaming or symlinking this executable to a name beginning with `python`
-makes it behave like a plain CPython interpreter and forwards every
-argument to it, which is what `run-python` does explicitly.
-",
-        )
-        .arg_required_else_help(true);
+    0
+}
 
-    let app = app.subcommand(
-        Command::new("run-python")
-            .about("Make the executable behave like a `python` executable")
-            .arg(
-                Arg::new("args")
-                    .help("Arguments to Python interpreter")
-                    .action(ArgAction::Append)
-                    .num_args(0..)
-                    .value_parser(value_parser!(OsString))
-                    .last(true),
-            ),
-    );
+pub fn run() -> Result<i32> {
+    let exe = std::env::current_exe().context("resolving current executable")?;
+    let mut args: Vec<OsString> = std::env::args_os().skip(1).collect();
 
-    let app = app.subcommand(
-        Command::new("run-yaml")
-            .about("Run a Python interpreter defined via a YAML file")
-            .arg_required_else_help(true)
-            .arg(
-                Arg::new("yaml_path")
-                    .value_name("FILE")
-                    .action(ArgAction::Set)
-                    .value_parser(value_parser!(PathBuf))
-                    .required(true)
-                    .help("Path to YAML file to evaluate"),
-            )
-            .arg(
-                Arg::new("args")
-                    .help("Arguments to Python interpreter")
-                    .action(ArgAction::Append)
-                    .num_args(0..)
-                    .value_parser(value_parser!(OsString))
-                    .last(true),
-            ),
-    );
-
-    let matches = app.get_matches();
-
-    match matches.subcommand() {
-        Some(("run-python", args)) => {
-            let program_args = args
-                .get_many::<OsString>("args")
-                .unwrap_or_default()
-                .collect::<Vec<_>>();
-
-            run_python(exe, &program_args)
+    // Deprecated subcommand spellings. They are only recognized as the first
+    // argument, so `pyoxy run-yaml.py` still runs a program by that name.
+    match args
+        .first()
+        .map(|x| x.to_string_lossy().to_string())
+        .as_deref()
+    {
+        Some(LEGACY_RUN_PYTHON) => {
+            args.remove(0);
+            strip_separator(&mut args);
+            return run_python(&exe, &args);
         }
-        Some(("run-yaml", args)) => {
+        Some(LEGACY_RUN_YAML) => {
+            args.remove(0);
+
             let yaml_path = args
-                .get_one::<PathBuf>("yaml_path")
-                .expect("yaml_path should be set");
+                .first()
+                .cloned()
+                .context("run-yaml requires a file; use --yaml FILE")?;
+            args.remove(0);
+            strip_separator(&mut args);
 
-            let program_args = args
-                .get_many::<OsString>("args")
-                .unwrap_or_default()
-                .collect::<Vec<_>>();
-
-            run_yaml_path(yaml_path, &program_args)
+            return run_yaml_path(Path::new(&yaml_path), &args);
         }
-        _ => Err(anyhow!("invalid sub-command")),
+        _ => {}
+    }
+
+    match take_runner_option(&mut args) {
+        RunnerOption::Help => Ok(print_runner_help()),
+        RunnerOption::Yaml(yaml_path) => run_yaml_path(&yaml_path, &args),
+        RunnerOption::MissingYamlPath => Err(anyhow::anyhow!(
+            "--yaml requires a file: pyoxy --yaml FILE [args...]"
+        )),
+        // Everything else is Python's: no arguments means a REPL, and `-c`,
+        // `-m`, a script path, `-`, `--help` and so on are the interpreter's
+        // business, not ours.
+        RunnerOption::None => run_python(&exe, &args),
     }
 }

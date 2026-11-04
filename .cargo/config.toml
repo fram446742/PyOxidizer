@@ -6,7 +6,8 @@ opt-level = 3
 # on its own and errors listing all three. These aliases name them:
 #
 #   cargo pyo --help                       the PyOxidizer build tool
-#   cargo oxy -- run-yaml config.yaml      the self-contained Python runner
+#   cargo oxy -- -c 'print(1)'             the self-contained Python runner (like `python`)
+#   cargo oxy -- --yaml config.yaml        runner feature: YAML-configured interpreter
 #   cargo rel synchronize-generated-files  repository release automation
 [alias]
 pyo = ["run", "--quiet", "--bin", "pyoxidizer", "--"]

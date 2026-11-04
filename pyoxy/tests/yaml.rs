@@ -17,12 +17,16 @@ fn run() -> Result<()> {
         assert!(stdout_path.exists());
         let expected_stdout = std::fs::read_to_string(&stdout_path)?;
 
-        Command::cargo_bin("pyoxy")?
-            .arg("run-yaml")
-            .arg(&yaml_path)
-            .assert()
-            .success()
-            .stdout(predicate::str::contains(expected_stdout).normalize());
+        // Both spellings of the YAML runner are covered: the current
+        // `--yaml` option and the deprecated `run-yaml` subcommand.
+        for invocation in [["--yaml"], ["run-yaml"]] {
+            Command::cargo_bin("pyoxy")?
+                .args(invocation)
+                .arg(&yaml_path)
+                .assert()
+                .success()
+                .stdout(predicate::str::contains(&expected_stdout).normalize());
+        }
     }
 
     Ok(())
