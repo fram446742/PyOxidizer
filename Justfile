@@ -128,8 +128,14 @@ pyoxy python_version="3.11" libraries="" triple=default_triple opt="3" split="":
   else
     mode="embedded (single file)"
   fi
-  modular=$(ls -d dist/pyoxy/pyoxy-modules/*/ dist/pyoxy/pyoxy-modules/*.packed-resources 2>/dev/null | wc -l)
-  echo "ok: dist/pyoxy/pyoxy - $mode, $baked; $modular modular librar(y|ies) beside it"
+  # `ls` on an empty or missing directory fails, and pipefail would abort the
+  # recipe after a successful build. Count with find instead.
+  modular=0
+  if [ -d dist/pyoxy/pyoxy-modules ]; then
+    modular=$(find dist/pyoxy/pyoxy-modules -mindepth 1 -maxdepth 1 \( -type d -o -name '*.packed-resources' \) | wc -l)
+  fi
+  if [ "$modular" -eq 1 ]; then noun="library"; else noun="libraries"; fi
+  echo "ok: dist/pyoxy/pyoxy - $mode, $baked; $modular modular $noun beside it"
 
 # Build and run the development pyoxy: it links the system's libpython
 # dynamically and inherits its search paths, so it starts instantly (no
@@ -202,6 +208,22 @@ pyoxy-package-dir python_version="3.11" *req:
 
   cargo run --release --quiet --bin pyoxidizer -- package --unpack \
     --python-version {{python_version}} --dest dist/pyoxy-modules {{req}}
+
+# Remove everything this repository generates: built executables and library
+# files (dist/), the Starlark build tree and the separate cargo target
+# directory used for pyoxy.
+#
+# The workspace-wide target/ directory is kept: it is cargo's shared cache and
+# deleting it makes the next build start from scratch. Use `just clean-all` to
+# drop that too.
+clean:
+  rm -rf dist pyoxy/build pyoxy/target
+  echo 'removed dist/, pyoxy/build/, pyoxy/target/; kept target/ (use just clean-all for that)' 
+
+# Remove the workspace-wide cargo target directory as well.
+clean-all: clean
+  rm -rf target
+  echo 'removed target/' 
 
 # Run the test suites of the pyoxidizer build tool and the pyoxy runner.
 test:

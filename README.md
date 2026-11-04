@@ -83,6 +83,10 @@ binary, statically linked; third-party libraries stay outside, modular.**
 build, so the runner and its libraries are always in the same directory.
 Neither mode needs a Python installation on the target machine.
 
+`just clean` removes what these commands generate (`dist/`, `pyoxy/build/`,
+`pyoxy/target/`) and keeps cargo's shared `target/` cache; `just clean-all`
+drops that cache too. Both are reproducible by re-running the recipes.
+
 ### Which library mode can I use?
 
 | Package kind | Packed (`pyoxy-package`) | Unpacked (`pyoxy-package-dir`) |
