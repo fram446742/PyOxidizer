@@ -1,0 +1,175 @@
+Help for the library-shipping commands, including the split resources flag.
+
+```
+$ pyoxidizer pyoxy --help
+Build a self-contained pyoxy Python runner executable.
+
+A pyoxy executable statically links a Python distribution, embeds its
+standard library, and behaves like a `python` executable; see the pyoxy
+documentation for its runner features.
+
+The project directory (--path, default: the current directory) must contain
+a pyoxidizer.bzl defining a `resources` target that emits Python embedding
+artifacts, and a Cargo crate defining a `pyoxy` binary that consumes them:
+this command runs the equivalent of:
+
+    pyoxidizer build --path DIR --target TRIPLE resources
+    cargo build --bin pyoxy --target TRIPLE   # with PYO3_CONFIG_FILE set
+    cp BUILD_PATH/<triple>/<profile>/pyoxy --dest
+
+Starlark variables are honored (--var): `PYTHON_VERSION` selects the
+distribution and `REQUIREMENTS` bakes third-party packages into the single
+executable, e.g.
+
+    pyoxidizer pyoxy --path pyoxy --var REQUIREMENTS "requests lxml"
+
+The resources are embedded in the executable by default, so it is one file
+that works wherever it is copied. With --split-resources they are written to
+a sibling `pyoxy-resources.packed-resources` file instead, which the runner
+memory-maps: the executable drops from ~150 MB to ~23 MB (libpython is still
+linked statically), at the cost of shipping and keeping the two files
+together.
+
+To obtain per-package files for the `pyoxy-modules` loader instead - one
+file per package, addable and removable without rebuilding anything - use
+`pyoxidizer package`.
+
+
+Usage: pyoxidizer pyoxy [OPTIONS]
+
+Options:
+      --system-rust
+          Use a system install of Rust instead of a self-managed Rust installation
+          
+          [env: PYOXIDIZER_SYSTEM_RUST=]
+
+      --target-triple <TRIPLE>
+          Rust target triple to use
+
+      --release
+          Build a release binary
+
+  -v, --verbose...
+          Increase logging verbosity. Can be specified multiple times
+
+  -q, --quiet
+          Suppress all logging. Takes precedence over --verbose
+
+      --split-resources
+          Write the packed resources next to the executable instead of embedding them
+
+      --path <DIR>
+          Directory containing the pyoxy project to build
+          
+          [default: .]
+
+      --dest <DIR>
+          Directory to write the built executable to
+          
+          [default: .]
+
+      --name <NAME>
+          File name to write the executable as
+          
+          [default: pyoxy]
+
+      --var <name> <value>
+          Defines a single string key to set in the VARS global dict.
+          
+          This argument can be used to inject variable content into the Starlark
+          execution context to influence evaluation.
+          
+          <name> defines the key in the dict to set and <value> is its string
+          value.
+          
+          For example, `--var my_var my_value` is functionally similar to the
+          Starlark expression `VARS["my_var"] = "my_value"`.
+          
+          If a Starlark variable is defined multiple times, an error occurs.
+          
+
+      --var-env <name> <env>
+          Defines a single string key to set in the VARS global dict from an environment variable.
+          
+          This is like --var except the value of the dict key comes from an
+          environment variable.
+          
+          The <env> environment variable is read and becomes the value of the
+          <name> key in the VARS dict.
+          
+          If the <env> environment variable is not set, the Starlark value will
+          be `None` instead of a `string`.
+          
+          If a Starlark variable is defined multiple times, an error occurs.
+          
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+```
+
+```
+$ pyoxidizer package --help
+Write one packed resources file per Python package.
+
+For the given requirements, pip resolves each package and its dependencies
+and every resolved wheel is classified and serialized to its own
+`<name>.packed-resources` file in --dest. Output files are platform
+independent as long as wheels are pure Python; C extension modules and
+files that cannot be exported are skipped with a warning, and a summary of
+what was skipped is printed at the end.
+
+Each file is accompanied by a `<name>.packed-resources.json` recording the
+Python version and target triple it was built for. A pyoxy executable skips
+files it cannot load and says why, instead of failing on bytecode compiled
+by a different interpreter.
+
+The files can be loaded from memory:
+
+* by a pyoxy executable: copy the file into the `pyoxy-modules` directory
+  next to the executable (creating it if needed) and the library becomes
+  importable; deleting the file removes it again.
+* by any pyembed embedding: list the file in the `packed_resources` field
+  of an interpreter configuration.
+
+
+Usage: pyoxidizer package [OPTIONS] <REQ>...
+
+Arguments:
+  <REQ>...
+          Requirements pip can resolve, e.g. `requests` or `lxml>=5`
+
+Options:
+      --dest <DIR>
+          Directory to write the packed resources files to
+          
+          [default: .]
+
+      --system-rust
+          Use a system install of Rust instead of a self-managed Rust installation
+          
+          [env: PYOXIDIZER_SYSTEM_RUST=]
+
+      --target-triple <TRIPLE>
+          Rust target triple to use
+          
+          [default: x86_64-unknown-linux-gnu]
+
+  -v, --verbose...
+          Increase logging verbosity. Can be specified multiple times
+
+      --flavor <FLAVOR>
+          Python distribution flavor
+          
+          [default: standalone]
+
+  -q, --quiet
+          Suppress all logging. Takes precedence over --verbose
+
+      --python-version <X.Y>
+          Python version (X.Y) to use
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+```

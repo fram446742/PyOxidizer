@@ -74,6 +74,13 @@ executable, e.g.
 
     pyoxidizer pyoxy --path pyoxy --var REQUIREMENTS \"requests lxml\"
 
+The resources are embedded in the executable by default, so it is one file
+that works wherever it is copied. With --split-resources they are written to
+a sibling `pyoxy-resources.packed-resources` file instead, which the runner
+memory-maps: the executable drops from ~150 MB to ~23 MB (libpython is still
+linked statically), at the cost of shipping and keeping the two files
+together.
+
 To obtain per-package files for the `pyoxy-modules` loader instead - one
 file per package, addable and removable without rebuilding anything - use
 `pyoxidizer package`.
@@ -86,7 +93,13 @@ For the given requirements, pip resolves each package and its dependencies
 and every resolved wheel is classified and serialized to its own
 `<name>.packed-resources` file in --dest. Output files are platform
 independent as long as wheels are pure Python; C extension modules and
-files that cannot be exported are skipped with a warning.
+files that cannot be exported are skipped with a warning, and a summary of
+what was skipped is printed at the end.
+
+Each file is accompanied by a `<name>.packed-resources.json` recording the
+Python version and target triple it was built for. A pyoxy executable skips
+files it cannot load and says why, instead of failing on bytecode compiled
+by a different interpreter.
 
 The files can be loaded from memory:
 
@@ -545,6 +558,14 @@ fn cmd_pyoxy() -> Command {
                     .long("release")
                     .action(ArgAction::SetTrue)
                     .help("Build a release binary"),
+            )
+            .arg(
+                Arg::new("split_resources")
+                    .long("split-resources")
+                    .action(ArgAction::SetTrue)
+                    .help(
+                        "Write the packed resources next to the executable instead of embedding them",
+                    ),
             )
             .arg(arg_project_path(
                 "Directory containing the pyoxy project to build",
@@ -1276,6 +1297,7 @@ pub fn run_cli() -> Result<()> {
             let path = args.get_one::<PathBuf>("path").unwrap();
             let dest_path = args.get_one::<PathBuf>("dest_path").unwrap();
             let name = args.get_one::<String>("name").unwrap();
+            let split_resources = args.get_flag("split_resources");
 
             projectmgmt::build_pyoxy_runner(
                 &env,
@@ -1285,6 +1307,7 @@ pub fn run_cli() -> Result<()> {
                 target_triple.map(|x| x.as_str()),
                 starlark_vars,
                 release,
+                split_resources,
                 verbose,
             )
         }

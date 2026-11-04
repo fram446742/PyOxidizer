@@ -33,7 +33,9 @@ const RUNNER_HELP: &str = "\
 A self-contained Python interpreter.
 
 The interpreter, its standard library and all of its native extension modules
-are embedded in this executable, so no Python installation is required.
+are embedded in this executable, so no Python installation is required. A build
+made with --split-resources keeps them in a `pyoxy-resources.packed-resources`
+file next to the executable instead; keep the two files together.
 
 By default this executable is a `python` executable. Every argument is handed to
 the interpreter: -c, -m, a script path, `-` for stdin, -O, -OO, -B, -E, -s, -X,
@@ -61,6 +63,8 @@ Runner features:
 
       Copy a file to add a library, delete it to remove one. `--yaml` configs
       can also list additional resources of their own via `packed_resources`.
+      A file whose `<name>.packed-resources.json` sidecar records a different
+      Python version is skipped with a warning instead of failing to import.
 
   --runner-help
       Print this message. -h and --help print the interpreter's usage instead,

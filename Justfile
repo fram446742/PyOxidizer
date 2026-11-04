@@ -68,15 +68,20 @@ python python_version="":
 # and embeds its standard library, so it needs no Python installation.
 #
 # libraries is an optional space separated list of Python packages to bake
-# into the single executable, e.g. `just pyoxy 3.10 "requests pyyaml"`.
+# into the single executable, e.g. `just pyoxy 3.11 "requests pyyaml"`.
 # Instead of baking, `just pyoxy-package` produces one removable file per
 # package; files in dist/pyoxy-modules/ are automatically copied next to
 # the built binary, so both mechanisms compose. Override the Rust target
-# triple with `just pyoxy <python-version> <libraries> <triple>`, and the
-# Rust optimization level with the fourth argument: 3 (default), 2, 1, s or
-# z. `z` shrinks the Rust part by ~1 MB out of a ~150 MB binary; the embedded
-# Python distribution and resources are unaffected by it.
-pyoxy python_version="3.10" libraries="" triple=default_triple opt="3":
+# triple with `just pyoxy <python-version> <libraries> <triple>`, the Rust
+# optimization level with the fourth argument (3, the default, or 2, 1, s, z;
+# `z` shrinks the Rust part by ~1 MB out of a ~150 MB binary since the
+# embedded Python distribution dominates), and pass a non-empty fifth
+# argument to ship the resources next to the executable instead of embedding
+# them: `just pyoxy 3.11 "requests" x86_64-unknown-linux-gnu 3 split` writes
+# a ~23 MB binary (libpython is still linked statically; the Rust code is
+# ~3 MB) plus `pyoxy-resources.packed-resources`. Keep both files together;
+# the runner reads the blob from its own directory.
+pyoxy python_version="3.11" libraries="" triple=default_triple opt="3" split="":
   #!/usr/bin/env bash
   set -eo pipefail
 
@@ -91,6 +96,12 @@ pyoxy python_version="3.10" libraries="" triple=default_triple opt="3":
   args=(--release --target-triple {{triple}} --var PYTHON_VERSION {{python_version}})
   if [ -n "{{libraries}}" ]; then
     args+=(--var REQUIREMENTS "{{libraries}}")
+  fi
+  if [ -n "{{split}}" ]; then
+    args+=(--split-resources)
+  else
+    # Switching back from split mode must not leave a stale blob behind.
+    rm -f dist/pyoxy/pyoxy-resources.packed-resources
   fi
 
   cargo run --release --quiet --bin pyoxidizer -- pyoxy \
@@ -125,17 +136,27 @@ pyoxy-dev *args:
 #
 # Copying a file in makes the library importable to pyoxy; deleting the file
 # removes it. No rebuild of anything is needed either way. Example:
-# `just pyoxy-package requests pyyaml lxml`.
+# `just pyoxy-package 3.11 requests pyyaml lxml`.
 #
-# The host's default target triple and pyoxidizer's default Python version
-# are used; pass `--target-triple`/`--python-version` when invoking pyoxidizer
-# directly for overrides.
-pyoxy-package *req:
+# The first argument is the Python version; it defaults to the version
+# `just pyoxy` builds, so runner and library files agree. A file carries a
+# `.packed-resources.json` sidecar recording that version, and a runner built
+# against a different Python skips it with a warning instead of failing on
+# incompatible bytecode. The host's default target triple is used; pass
+# `--target-triple` when invoking pyoxidizer directly for overrides.
+pyoxy-package python_version="3.11" *req:
   #!/usr/bin/env bash
   set -eo pipefail
 
+  # `*req` is variadic and must come last, so the version is the first
+  # positional argument; catch the easy mistake of omitting it.
+  case "{{python_version}}" in
+    [0-9]*.[0-9]*) ;;
+    *) echo "first argument must be the Python version, e.g. \`just pyoxy-package 3.11 requests\` (got '{{python_version}}')" >&2; exit 1 ;;
+  esac
+
   cargo run --release --quiet --bin pyoxidizer -- package \
-    --dest dist/pyoxy-modules {{req}}
+    --python-version {{python_version}} --dest dist/pyoxy-modules {{req}}
 
 # Run the test suites of the pyoxidizer build tool and the pyoxy runner.
 test:

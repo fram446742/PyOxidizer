@@ -552,6 +552,10 @@ pub fn python_package_generate_packed_resources(
     let compiler_temp = env.temporary_directory("python-package-bytecode")?;
     let mut compiler = BytecodeCompiler::new(dist.python_exe_path(), compiler_temp.path())?;
 
+    let python_version = dist.python_major_minor_version();
+    let mut skipped_extension_modules = 0;
+    let mut skipped_files = 0;
+
     for (name, resources) in wheels {
         let mut collector = PythonResourceCollector::new(
             vec![AbstractResourceLocation::InMemory],
@@ -583,8 +587,14 @@ pub fn python_package_generate_packed_resources(
                 // mirroring the bake path in pyoxy/pyoxidizer.bzl.
                 PythonResource::ExtensionModule(_) | PythonResource::File(_) => {
                     let kind = match resource {
-                        PythonResource::ExtensionModule(_) => "C extension module",
-                        _ => "untyped file",
+                        PythonResource::ExtensionModule(_) => {
+                            skipped_extension_modules += 1;
+                            "C extension module"
+                        }
+                        _ => {
+                            skipped_files += 1;
+                            "untyped file"
+                        }
                     };
                     warn!(
                         "skipping {} from {} because it cannot be loaded from memory",
@@ -627,6 +637,18 @@ pub fn python_package_generate_packed_resources(
         writer.flush()?;
         drop(writer);
 
+        // pyoxy reads this before loading the file: bytecode from another
+        // Python fails with opaque import errors, so it must be skipped
+        // loudly. Absence of the sidecar means "load it anyway".
+        let metadata_file = dest_path.join(format!("{}.packed-resources.json", name));
+        let metadata = serde_json::json!({
+            "python_version": python_version,
+            "target_triple": target_triple,
+        });
+
+        std::fs::write(&metadata_file, serde_json::to_string_pretty(&metadata)?)
+            .with_context(|| format!("writing {}", metadata_file.display()))?;
+
         println!("wrote {}", dest_file.display());
     }
 
@@ -634,9 +656,21 @@ pub fn python_package_generate_packed_resources(
         .close()
         .context("closing temporary directory")?;
 
+    // Warnings scroll by in a long build; summarize so a package whose C
+    // accelerator was dropped is not mistaken for fully packaged.
+    if skipped_extension_modules + skipped_files > 0 {
+        println!(
+            "skipped {} resource(s) that cannot be loaded from memory: {} C extension module(s), {} untyped file(s)",
+            skipped_extension_modules + skipped_files,
+            skipped_extension_modules,
+            skipped_files
+        );
+    }
+
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_pyoxy_runner(
     env: &Environment,
     project_path: &Path,
@@ -645,6 +679,7 @@ pub fn build_pyoxy_runner(
     target_triple: Option<&str>,
     extra_vars: HashMap<String, Option<String>>,
     release: bool,
+    split_resources: bool,
     verbose: bool,
 ) -> Result<()> {
     // First stage: evaluate the project's `resources` target, which writes the
@@ -754,6 +789,15 @@ pub fn build_pyoxy_runner(
         pyo3_config.display().to_string(),
     );
 
+    // Read by pyoxy/build.rs: it decides whether the packed resources are
+    // compiled in or loaded from a sibling file at run time.
+    if split_resources {
+        env_vars.insert(
+            "PYOXIDIZER_PACKED_RESOURCES_SPLIT".to_string(),
+            "1".to_string(),
+        );
+    }
+
     let command = cmd("cargo", &cmd_args)
         .full_env(env_vars)
         .dir(project_path)
@@ -794,6 +838,20 @@ pub fn build_pyoxy_runner(
         .with_context(|| format!("copying executable to {}", dest_exe.display()))?;
 
     println!("wrote {}", dest_exe.display());
+
+    // With --split-resources the blob is not embedded: it ships as a sibling
+    // file that the runner memory-maps. Its fixed name is what
+    // pyoxy/src/interpreter.rs looks for (STDLIB_RESOURCES_FILE).
+    if split_resources {
+        let source = artifacts_dir.join("resources").join("packed-resources");
+        let dest_blob = dest_path.join("pyoxy-resources.packed-resources");
+
+        std::fs::copy(&source, &dest_blob)
+            .with_context(|| format!("copying packed resources to {}", dest_blob.display()))?;
+
+        println!("wrote {} (sidecar resources)", dest_blob.display());
+    }
+
     println!("artifacts: {}", artifacts_dir.display());
 
     Ok(())

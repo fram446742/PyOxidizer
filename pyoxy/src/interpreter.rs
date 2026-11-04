@@ -21,6 +21,11 @@ const STDLIB_RESOURCES_DATA: Option<&[u8]> =
 #[cfg(not(stdlib_packed_resources))]
 const STDLIB_RESOURCES_DATA: Option<&[u8]> = None;
 
+/// Packed resources file read from the executable's directory instead of being
+/// embedded, as built by `pyoxidizer pyoxy --split-resources`.
+#[cfg(stdlib_packed_resources_split)]
+const STDLIB_RESOURCES_FILE: &str = "pyoxy-resources.packed-resources";
+
 /// Directory next to the executable scanned for per-library resources.
 ///
 /// Each `*.packed-resources` file in it is registered as a resource source:
@@ -29,6 +34,57 @@ const STDLIB_RESOURCES_DATA: Option<&[u8]> = None;
 const MODULES_DIR: &str = "pyoxy-modules";
 
 const MODULES_FILE_SUFFIX: &str = ".packed-resources";
+
+/// Python version (major.minor) this binary was built against, when known.
+///
+/// A dynamic build against the host's libpython carries no version, in which
+/// case sidecar files are loaded without a compatibility check.
+const PYTHON_VERSION: Option<&str> = option_env!("PYOXY_PYTHON_VERSION");
+
+/// Metadata written next to each `pyoxy-modules` file by `pyoxidizer package`.
+#[derive(Debug, Deserialize)]
+struct ModuleFileMetadata {
+    python_version: Option<String>,
+}
+
+/// Whether a per-library file was built for the interpreter running it.
+///
+/// Bytecode compiled by another Python fails with opaque errors, so a
+/// mismatched file is skipped with a warning instead. Files without metadata
+/// (older `pyoxidizer package` output) are always accepted.
+fn module_file_compatible(path: &Path) -> bool {
+    let Some(expected) = PYTHON_VERSION else {
+        return true;
+    };
+
+    let metadata_path = path.with_extension("packed-resources.json");
+    let Ok(raw) = std::fs::read_to_string(&metadata_path) else {
+        return true;
+    };
+
+    match serde_yaml::from_str::<ModuleFileMetadata>(&raw) {
+        Ok(metadata) => match metadata.python_version {
+            Some(version) if version != expected => {
+                eprintln!(
+                    "pyoxy: skipping {}: built for Python {}, this runner is Python {}",
+                    path.display(),
+                    version,
+                    expected
+                );
+                false
+            }
+            _ => true,
+        },
+        Err(e) => {
+            eprintln!(
+                "pyoxy: ignoring unreadable {}: {}",
+                metadata_path.display(),
+                e
+            );
+            true
+        }
+    }
+}
 
 fn add_module_files<'a>(builder: &mut pyembed::OxidizedPythonInterpreterConfig<'a>, dir: &Path) {
     let mut paths: Vec<_> = match std::fs::read_dir(dir) {
@@ -52,6 +108,10 @@ fn add_module_files<'a>(builder: &mut pyembed::OxidizedPythonInterpreterConfig<'
     }
 
     for path in paths {
+        if !module_file_compatible(&path) {
+            continue;
+        }
+
         // Memory-mapped so a large library set costs no Rust memory and files
         // can be added and removed while files are being copied around.
         builder
@@ -96,11 +156,39 @@ impl<'a> Config<'a> {
             .ok()
             .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()));
 
+        // Resources are either compiled in or, with --split-resources, loaded
+        // from a file next to the executable. Both make the binary
+        // self-contained with respect to the host's Python installation.
+        let mut self_contained = false;
+
         if let Some(resources) = STDLIB_RESOURCES_DATA {
             // Register the packed resources and enable oxidized_importer to load them.
             self.inner
                 .packed_resources
                 .push(PackedResourcesSource::Memory(resources));
+            self_contained = true;
+        }
+
+        #[cfg(stdlib_packed_resources_split)]
+        if let Some(exe_dir) = &exe_dir {
+            let path = exe_dir.join(STDLIB_RESOURCES_FILE);
+
+            if path.is_file() {
+                // Memory-mapped: the standard library blob is over 100 MB and
+                // should never be read into anonymous memory.
+                self.inner
+                    .packed_resources
+                    .push(PackedResourcesSource::MemoryMappedPath(path));
+                self_contained = true;
+            } else {
+                eprintln!(
+                    "pyoxy: {} not found next to the executable; the standard library and baked packages are unavailable",
+                    path.display()
+                );
+            }
+        }
+
+        if self_contained {
             self.inner.oxidized_importer = true;
 
             // The default sys.path doesn't exist in self-contained binaries. So

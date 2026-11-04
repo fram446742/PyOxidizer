@@ -6,7 +6,9 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=PYO3_CONFIG_FILE");
+    println!("cargo:rerun-if-env-changed=PYOXIDIZER_PACKED_RESOURCES_SPLIT");
     println!("cargo:rustc-check-cfg=cfg(stdlib_packed_resources)");
+    println!("cargo:rustc-check-cfg=cfg(stdlib_packed_resources_split)");
 
     // By default Rust will not export dynamic symbols from built executables.
     // If we're linking libpython, we need its symbols to be exported in order to
@@ -39,13 +41,41 @@ fn main() {
 
         if packed_resources_path.exists() {
             println!("cargo:rerun-if-changed={}", packed_resources_path.display());
-            println!("cargo:rustc-cfg=stdlib_packed_resources");
-            println!(
-                "cargo:rustc-env=PYTHON_PACKED_RESOURCES_PATH={}",
-                packed_resources_path.display()
-            );
+
+            // `pyoxidizer pyoxy --split-resources` ships the blob as a sibling
+            // file so the executable stays small. The blob is not embedded, so
+            // it must not be compiled in: the loader reads it at run time.
+            let split = std::env::var("PYOXIDIZER_PACKED_RESOURCES_SPLIT")
+                .map(|v| v == "1")
+                .unwrap_or(false);
+
+            if split {
+                println!("cargo:rustc-cfg=stdlib_packed_resources_split");
+            } else {
+                println!("cargo:rustc-cfg=stdlib_packed_resources");
+                println!(
+                    "cargo:rustc-env=PYTHON_PACKED_RESOURCES_PATH={}",
+                    packed_resources_path.display()
+                );
+            }
+        }
+
+        // The interpreter version the binary is built against, used to reject
+        // `pyoxy-modules` files compiled by a different Python.
+        if let Some(version) = pyo3_config_python_version(&config_path) {
+            println!("cargo:rustc-env=PYOXY_PYTHON_VERSION={}", version);
         }
     }
+}
+
+/// Extract `version=` from a PyO3 configuration file, e.g. `3.11`.
+fn pyo3_config_python_version(config_path: &Path) -> Option<String> {
+    let config = std::fs::read_to_string(config_path).ok()?;
+
+    config
+        .lines()
+        .find_map(|line| line.strip_prefix("version="))
+        .map(|version| version.trim().to_string())
 }
 
 /// Re-emits linker arguments from the PyO3 configuration file.

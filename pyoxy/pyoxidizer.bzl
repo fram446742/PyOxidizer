@@ -2,7 +2,7 @@
 # enable us to link Python into a new binary.
 
 BUILD_PATH = VARS.get("BUILD_PATH", CWD + "/build")
-PYTHON_VERSION = VARS.get("PYTHON_VERSION", "3.10")
+PYTHON_VERSION = VARS.get("PYTHON_VERSION", "3.11")
 
 # Space separated Python requirements to embed in the produced resources.
 # e.g. --var REQUIREMENTS "requests pyyaml". Empty by default.
@@ -42,13 +42,19 @@ def make_resources():
         # A packed resources blob loaded from memory cannot carry extension
         # modules or untyped files. Like `pyoxidizer package`, those are
         # skipped so e.g. requests embeds despite its C accelerator wheels.
-        resources = [
+        kept = [
             r
             for r in resources
             if type(r) not in ("PythonExtensionModule", "File")
         ]
 
-        exe.add_python_resources(resources)
+        skipped = len(resources) - len(kept)
+        if skipped:
+            print(
+                "pyoxy: skipping {} resource(s) that cannot be loaded from memory".format(skipped)
+            )
+
+        exe.add_python_resources(kept)
 
     exe.add_cargo_manifest_licensing(CWD + "/Cargo.toml")
 
