@@ -67,7 +67,10 @@ package reports an incomplete file and the command ends with a
 ``packaging complete`` / ``packaging incomplete`` verdict naming it. Modules
 loaded this way also have no ``__file__``, so packages that read it at import
 time fail with ``NameError``; pure Python packages that avoid both are the
-sweet spot for this mechanism.
+sweet spot for this mechanism. Loading a shared library from memory is only
+implemented on Windows, so on Linux a package that needs its ``*.so``
+(``numpy``, ``pandas``, ``psutil``) cannot run from packed resources at all,
+regardless of how the files are grouped.
 
 Each file is accompanied by a ``<name>.packed-resources.json`` sidecar recording
 the Python version and target triple it was built for. A ``pyoxy`` built for a

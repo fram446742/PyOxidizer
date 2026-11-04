@@ -97,6 +97,11 @@ files that cannot be exported are skipped, each package says so when its
 file is incomplete, and a final verdict names the packages that lost
 resources. Use --verbose for the individual skipped modules.
 
+Extension modules cannot be loaded from a packed resources file on Linux
+(in-memory shared library loading is Windows-only), so packages that need
+their .so - numpy, pandas, psutil - remain unusable this way no matter how
+the files are split.
+
 Each file is accompanied by a `<name>.packed-resources.json` recording the
 Python version and target triple it was built for. A pyoxy executable skips
 files it cannot load and says why, instead of failing on bytecode compiled

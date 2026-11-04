@@ -157,7 +157,13 @@ Two independent limits are worth knowing before choosing a package:
   `pyyaml` and `wcwidth` fall back to pure Python, `capstone`, `cffi`,
   `psutil` and `cmsis-pack-manager` do not. The verdict only tells you which
   packages were affected, so check the imports you need with
-  `pyoxy -c 'import <package>'`. Pure Python packages
+  `pyoxy -c 'import <package>'`.
+* There is no escaping this by splitting files: loading a shared library
+  from memory is only implemented for Windows, and on Linux the importer
+  refuses it outright. `numpy` and `pandas` are therefore out of reach for
+  any packed-resources mode, however the files are grouped — they need their
+  `*.so` files to exist on disk. Run the packaging command anyway to see the
+  exact count (`numpy` loses 20, `pandas` 44 on 3.11). Pure Python packages
 (`requests`, `click`, `attrs`, `pyyaml`, ...) are the sweet spot; a package
 whose optional C accelerator is skipped still imports and works, just
 without the accelerated path (e.g. `charset_normalizer` behind `requests`).

@@ -575,6 +575,16 @@ pub fn python_package_generate_packed_resources(
                 PythonResource::ModuleSource(r) => {
                     collector.add_python_module_source(r, &ConcreteResourceLocation::InMemory)?;
                 }
+                // Wheels ship some modules only as .pyc (numpy has one), and
+                // others as source that still needs compiling. Both are
+                // perfectly loadable from memory.
+                PythonResource::ModuleBytecode(r) => {
+                    collector.add_python_module_bytecode(r, &ConcreteResourceLocation::InMemory)?;
+                }
+                PythonResource::ModuleBytecodeRequest(r) => {
+                    collector
+                        .add_python_module_bytecode_from_source(r, &ConcreteResourceLocation::InMemory)?;
+                }
                 PythonResource::PackageResource(r) => {
                     collector
                         .add_python_package_resource(r, &ConcreteResourceLocation::InMemory)?;

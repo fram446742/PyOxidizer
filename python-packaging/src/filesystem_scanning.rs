@@ -486,15 +486,28 @@ impl<'a> PythonResourceIterator<'a> {
 
             self.seen_packages.insert(package);
 
-            return Some(PathItem::PythonResource(Box::new(
-                PythonModuleBytecode::from_path(
+            // Wheels are scanned from in-memory data whose paths are virtual,
+            // so a bytecode file has to be read from the override rather than
+            // from the path. `resolve_bytecode()` strips the 16 byte CPython
+            // header from files, so do the same here.
+            let file_data = self.resolve_file_data(path);
+            let module = match &file_data {
+                FileData::Memory(data) if data.len() >= 16 => PythonModuleBytecode::new(
+                    &full_module_name,
+                    optimization_level,
+                    is_package_from_path(path),
+                    &self.cache_tag,
+                    &data[16..],
+                ),
+                _ => PythonModuleBytecode::from_path(
                     &full_module_name,
                     optimization_level,
                     &self.cache_tag,
                     path,
-                )
-                .into(),
-            )));
+                ),
+            };
+
+            return Some(PathItem::PythonResource(Box::new(module.into())));
         }
 
         let resource = match rel_path.extension().and_then(OsStr::to_str) {
@@ -711,6 +724,42 @@ mod tests {
         optimized_bytecode: vec![],
         extension: vec![],
     });
+
+    /// Bytecode scanned from provided bytes must not fall back to reading a
+    /// path: wheel entries have virtual paths that do not exist on disk.
+    #[test]
+    fn test_bytecode_from_data_locations_uses_provided_bytes() -> Result<()> {
+        let mut pyc = vec![0u8; 16];
+        pyc.extend_from_slice(b"bytecode payload");
+
+        let files = vec![File::new(
+            "pkg/__pycache__/mod.cpython-311.pyc",
+            &pyc[..],
+        )];
+
+        let resources = PythonResourceIterator::from_data_locations(
+            &files,
+            "cpython-311",
+            &DEFAULT_SUFFIXES,
+            true,
+            true,
+        )?
+        .collect::<Result<Vec<_>>>()?;
+
+        let bytecode = resources
+            .iter()
+            .find_map(|r| match r {
+                PythonResource::ModuleBytecode(r) => Some(r),
+                _ => None,
+            })
+            .expect("bytecode resource");
+
+        assert_eq!(bytecode.name, "pkg.mod");
+        // The 16 byte header is stripped, as for file-backed bytecode.
+        assert_eq!(bytecode.resolve_bytecode()?, b"bytecode payload");
+
+        Ok(())
+    }
 
     #[test]
     fn test_source_resolution() -> Result<()> {
