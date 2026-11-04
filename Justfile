@@ -54,25 +54,49 @@ python python_version="":
   cargo run --release --quiet --bin pyoxidizer -- python --dest dist/python "${args[@]}"
   ls -lh dist/python/
 
-# Build the pyoxy runner and copy it to ./python.
+# Build the self-contained pyoxy runner into dist/pyoxy/.
 #
-# pyoxy is the shipped runner: besides behaving like `python` when its file
-# name begins with `python`, it can run interpreter configurations declared in
-# YAML and act as a script interpreter via shebang.
+# pyoxy is the shipped runner: it behaves like `python` by default, can run
+# interpreter configurations declared in YAML, and can act as a script
+# interpreter via shebang. The binary statically links a Python distribution
+# and embeds its standard library, so it needs no Python installation.
 #
-# The artifact is copied, not symlinked: pyoxy decides to masquerade by
-# inspecting current_exe(), which on Linux resolves symlinks, so a symlink
-# named python would report the real pyoxy path and parse its own arguments.
-pyoxy-python triple=default_triple python_version="3.10":
+# libraries is an optional space separated list of Python packages to bake
+# into the single executable, e.g. `just pyoxy 3.10 "requests pyyaml"`.
+# To get one file per package (addable/removable next to the binary at any
+# time) use `just pyoxy-package` instead. Override the Rust target triple
+# with `just pyoxy <python-version> <libraries> <triple>`.
+pyoxy python_version="3.10" libraries="" triple=default_triple:
   #!/usr/bin/env bash
   set -eo pipefail
 
-  cargo run --release --quiet --bin pyoxidizer -- build --release --path pyoxy \
-    --target-triple {{triple}} --var PYTHON_VERSION {{python_version}}
-  PYO3_CONFIG_FILE=$(pwd)/pyoxy/build/{{triple}}/release/resources/pyo3-build-config-file.txt \
-    cargo build --release --bin pyoxy --target {{triple}}
-  cp target/{{triple}}/release/pyoxy ./python
-  ./python -V
+  args=(--release --target-triple {{triple}} --var PYTHON_VERSION {{python_version}})
+  if [ -n "{{libraries}}" ]; then
+    args+=(--var REQUIREMENTS "{{libraries}}")
+  fi
+
+  cargo run --release --quiet --bin pyoxidizer -- pyoxy \
+    --path pyoxy --dest dist/pyoxy "${args[@]}"
+  ls -lh dist/pyoxy/
+  ./dist/pyoxy/pyoxy -V
+
+# Produce one `*.packed-resources` file per Python package into
+# dist/pyoxy-modules/, ready to copy next to a pyoxy executable under a
+# `pyoxy-modules/` directory.
+#
+# Copying a file in makes the library importable to pyoxy; deleting the file
+# removes it. No rebuild of anything is needed either way. Example:
+# `just pyoxy-package requests pyyaml lxml`.
+#
+# The host's default target triple and pyoxidizer's default Python version
+# are used; pass `--target-triple`/`--python-version` when invoking pyoxidizer
+# directly for overrides.
+pyoxy-package *req:
+  #!/usr/bin/env bash
+  set -eo pipefail
+
+  cargo run --release --quiet --bin pyoxidizer -- package \
+    --dest dist/pyoxy-modules {{req}}
 
 # Name of the repository section in ~/.pypirc that PyOxidizer wheels are
 # uploaded to. This fork is not published on pypi.org.

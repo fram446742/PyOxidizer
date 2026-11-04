@@ -13,12 +13,54 @@ use {
     },
 };
 
+/// The packed resources file(s) compiled into this executable.
 #[cfg(stdlib_packed_resources)]
 const STDLIB_RESOURCES_DATA: Option<&[u8]> =
     Some(include_bytes!(env!("PYTHON_PACKED_RESOURCES_PATH")));
 
 #[cfg(not(stdlib_packed_resources))]
 const STDLIB_RESOURCES_DATA: Option<&[u8]> = None;
+
+/// Directory next to the executable scanned for per-library resources.
+///
+/// Each `*.packed-resources` file in it is registered as a resource source:
+/// copying a file in makes the library importable, deleting the file removes
+/// it. This is the mechanism behind `pyoxidizer package`.
+const MODULES_DIR: &str = "pyoxy-modules";
+
+const MODULES_FILE_SUFFIX: &str = ".packed-resources";
+
+fn add_module_files<'a>(builder: &mut pyembed::OxidizedPythonInterpreterConfig<'a>, dir: &Path) {
+    let mut paths: Vec<_> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().ends_with(MODULES_FILE_SUFFIX))
+                        .unwrap_or(false)
+            })
+            .collect(),
+        // The directory does not have to exist.
+        Err(_) => return,
+    };
+    paths.sort();
+
+    if paths.is_empty() {
+        return;
+    }
+
+    for path in paths {
+        // Memory-mapped so a large library set costs no Rust memory and files
+        // can be added and removed while files are being copied around.
+        builder
+            .packed_resources
+            .push(PackedResourcesSource::MemoryMappedPath(path));
+    }
+
+    builder.oxidized_importer = true;
+}
 
 /// An embedded Python interpreter configuration.
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -50,11 +92,16 @@ impl<'a> From<Config<'a>> for OxidizedPythonInterpreterConfig<'a> {
 impl<'a> Config<'a> {
     /// Apply the current environment's settings to this config.
     pub fn apply_environment(&mut self) {
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()));
+
         if let Some(resources) = STDLIB_RESOURCES_DATA {
             // Register the packed resources and enable oxidized_importer to load them.
-            self.packed_resources
+            self.inner
+                .packed_resources
                 .push(PackedResourcesSource::Memory(resources));
-            self.oxidized_importer = true;
+            self.inner.oxidized_importer = true;
 
             // The default sys.path doesn't exist in self-contained binaries. So
             // prevent it from materializing by default. But don't overwrite a custom
@@ -65,13 +112,18 @@ impl<'a> Config<'a> {
 
             // Without this, Python will attempt to derive these automatically and will likely
             // emit warnings about the paths not existing.
-            if let Ok(exe) = std::env::current_exe() {
-                if let Some(exe_dir) = exe.parent() {
-                    self.interpreter_config.home = Some(exe_dir.to_path_buf());
-                    self.interpreter_config.prefix = Some(exe_dir.to_path_buf());
-                    self.interpreter_config.exec_prefix = Some(exe_dir.to_path_buf());
-                }
+            if let Some(exe_dir) = &exe_dir {
+                self.interpreter_config.home = Some(exe_dir.to_path_buf());
+                self.interpreter_config.prefix = Some(exe_dir.to_path_buf());
+                self.interpreter_config.exec_prefix = Some(exe_dir.to_path_buf());
             }
+        }
+
+        // Per-library resources shipped as files next to the executable. Also
+        // applies to a dynamic libpython build: that is how libraries are
+        // usually tried out during development.
+        if let Some(exe_dir) = &exe_dir {
+            add_module_files(&mut self.inner, &exe_dir.join(MODULES_DIR));
         }
 
         self.set_missing_path_configuration = false;

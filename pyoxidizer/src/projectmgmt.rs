@@ -6,7 +6,7 @@
 
 use {
     crate::{
-        environment::{canonicalize_path, default_target_triple, Environment, PyOxidizerSource},
+        environment::{Environment, PyOxidizerSource, canonicalize_path, default_target_triple},
         licensing::{licenses_from_cargo_manifest, log_licensing_info},
         project_building::find_pyoxidizer_config_file_env,
         project_layout::{
@@ -14,29 +14,37 @@ use {
         },
         py_packaging::{
             distribution::{
+                BinaryLibpythonLinkMode, DistributionCache, DistributionFlavor, PythonDistribution,
                 default_distribution_location, resolve_distribution,
-                resolve_python_distribution_archive, BinaryLibpythonLinkMode, DistributionCache,
-                DistributionFlavor, PythonDistribution,
+                resolve_python_distribution_archive,
             },
+            packaging_tool::pip_download_wheel_resources,
             standalone_distribution::StandaloneDistribution,
         },
         python_distributions::PYTHON_DISTRIBUTIONS,
+        shell::with_shell,
         starlark::eval::EvaluationContextBuilder,
     },
-    anyhow::{anyhow, Context, Result},
+    anyhow::{Context, Result, anyhow},
+    duct::cmd,
+    log::warn,
     python_packaging::licensing::LicenseFlavor,
     python_packaging::{
+        bytecode::BytecodeCompiler,
         filesystem_scanning::find_python_resources,
         interpreter::{MemoryAllocatorBackend, PythonInterpreterProfile},
+        location::{AbstractResourceLocation, ConcreteResourceLocation},
+        policy::ExtensionModuleFilter,
         resource::PythonResource,
+        resource_collection::PythonResourceCollector,
         wheel::WheelArchive,
     },
     simple_file_manifest::{FileData, FileManifest},
     std::{
         collections::HashMap,
         fs::create_dir_all,
-        io::{Cursor, Read},
-        path::Path,
+        io::{BufRead, BufReader, Cursor, Read, Write},
+        path::{Path, PathBuf},
     },
 };
 
@@ -481,6 +489,374 @@ pub fn build_standalone_python(
     println!("wrote {}", dest_exe.display());
 
     Ok(())
+}
+
+/// Write one packed resources file per Python package.
+///
+/// Each requirement is resolved with `pip download` (wheels only, including
+/// transitive dependencies); every resolved wheel is classified and serialized
+/// to `<name>.packed-resources` in `dest_path`, one file per pip package.
+/// Extensions modules and other resources that cannot be loaded from memory
+/// are skipped with a warning.
+pub fn python_package_generate_packed_resources(
+    env: &Environment,
+    dest_path: &Path,
+    requirements: &[String],
+    target_triple: &str,
+    flavor: &str,
+    python_version: Option<&str>,
+    verbose: bool,
+) -> Result<()> {
+    if requirements.is_empty() {
+        return Err(anyhow!("no requirements to package"));
+    }
+
+    let distribution_location = default_distribution_location(
+        &DistributionFlavor::try_from(flavor).map_err(|e| anyhow!("invalid --flavor: {}", e))?,
+        target_triple,
+        python_version,
+    )?;
+
+    // Resolution is shared with `pyoxidizer dist extract`, including its
+    // cache handling.
+    let cache_dir = env.python_distributions_dir();
+
+    let dist = resolve_distribution(&distribution_location, &cache_dir)
+        .context("resolving Python distribution")?;
+
+    let mut policy = dist.create_packaging_policy()?;
+    policy.set_extension_module_filter(ExtensionModuleFilter::All);
+    policy.set_include_distribution_sources(true);
+    policy.set_include_distribution_resources(true);
+    policy.set_resources_location(ConcreteResourceLocation::InMemory);
+    // Bytecode for every level so imports succeed under -O and -OO, matching
+    // the policy of `pyoxidizer python`.
+    policy.set_bytecode_optimize_level_zero(true);
+    policy.set_bytecode_optimize_level_one(true);
+    policy.set_bytecode_optimize_level_two(true);
+
+    let wheels = pip_download_wheel_resources(
+        env,
+        dist.as_ref(),
+        dist.as_ref(),
+        &policy,
+        verbose,
+        requirements,
+    )
+    .context("downloading Python packages with pip")?;
+
+    create_dir_all(dest_path)
+        .with_context(|| format!("creating destination directory {}", dest_path.display()))?;
+
+    // Bytecode compilation is driven by the distribution's own Python.
+    let compiler_temp = env.temporary_directory("python-package-bytecode")?;
+    let mut compiler = BytecodeCompiler::new(dist.python_exe_path(), compiler_temp.path())?;
+
+    for (name, resources) in wheels {
+        let mut collector = PythonResourceCollector::new(
+            vec![AbstractResourceLocation::InMemory],
+            // Extension modules are never written; keep the policy closed so
+            // mistakes fail instead of silently embedding .so data.
+            vec![],
+            false,
+            false,
+        );
+
+        for resource in &resources {
+            match resource {
+                PythonResource::ModuleSource(r) => {
+                    collector.add_python_module_source(r, &ConcreteResourceLocation::InMemory)?;
+                }
+                PythonResource::PackageResource(r) => {
+                    collector
+                        .add_python_package_resource(r, &ConcreteResourceLocation::InMemory)?;
+                }
+                PythonResource::PackageDistributionResource(r) => {
+                    collector.add_python_package_distribution_resource(
+                        r,
+                        &ConcreteResourceLocation::InMemory,
+                    )?;
+                }
+                // Resources that cannot be loaded from memory would make the
+                // packed resources file incomplete or unloadable. Skip them so
+                // e.g. requests packages despite its C accelerator wheels,
+                // mirroring the bake path in pyoxy/pyoxidizer.bzl.
+                PythonResource::ExtensionModule(_) | PythonResource::File(_) => {
+                    let kind = match resource {
+                        PythonResource::ExtensionModule(_) => "C extension module",
+                        _ => "untyped file",
+                    };
+                    warn!(
+                        "skipping {} from {} because it cannot be loaded from memory",
+                        kind, name
+                    );
+                }
+                _ => {
+                    return Err(anyhow!(
+                        "{} contains a resource that cannot be written to a single packed resources file: {:?}",
+                        name,
+                        resource
+                    ));
+                }
+            }
+        }
+
+        let compiled = collector
+            .compile_resources(&mut compiler)
+            .with_context(|| format!("compiling resources of {}", name))?;
+
+        // In-memory resources produce no extra file writes; wheels that do
+        // would make the per-package file incomplete, so fail loudly.
+        if !compiled.extra_files.is_empty() {
+            return Err(anyhow!(
+                "{} produced extra files that cannot be part of its packed resources file",
+                name
+            ));
+        }
+
+        let dest_file = dest_path.join(format!("{}.packed-resources", name));
+
+        let mut fh = std::fs::File::create(&dest_file)
+            .with_context(|| format!("opening {} for writing", dest_file.display()))?;
+        let mut writer = std::io::BufWriter::new(&mut fh);
+
+        compiled
+            .write_packed_resources(&mut writer)
+            .with_context(|| format!("writing {}", dest_file.display()))?;
+
+        writer.flush()?;
+        drop(writer);
+
+        println!("wrote {}", dest_file.display());
+    }
+
+    compiler_temp
+        .close()
+        .context("closing temporary directory")?;
+
+    Ok(())
+}
+
+pub fn build_pyoxy_runner(
+    env: &Environment,
+    project_path: &Path,
+    dest_path: &Path,
+    exe_name: &str,
+    target_triple: Option<&str>,
+    extra_vars: HashMap<String, Option<String>>,
+    release: bool,
+    verbose: bool,
+) -> Result<()> {
+    // First stage: evaluate the project's `resources` target, which writes the
+    // embedding artifacts - pyo3 config, packed resources, licensing - into
+    // the build directory.
+    let mut vars = extra_vars;
+
+    // The embedding artifacts for Python-linked executables always include the
+    // stdlib resources. Pointing BUILD_PATH at a project-local directory keeps
+    // them grouped with the binary that consumes them, mirroring the way
+    // `pyoxidizer python` builds. The path must be absolute: Starlark resolves
+    // a relative BUILD_PATH against its own CWD, which is the project
+    // directory, not the process's.
+    let project_path = std::fs::canonicalize(project_path)
+        .with_context(|| format!("resolving {}", project_path.display()))?;
+
+    // Capture the effective build path before `vars` is consumed by build().
+    vars.entry("BUILD_PATH".to_string())
+        .or_insert_with(|| Some(project_path.join("build").display().to_string()));
+    let build_dir = vars
+        .get("BUILD_PATH")
+        .cloned()
+        .and_then(|x| x)
+        .filter(|x| !x.is_empty())
+        .map(|x| {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(&x))
+                .unwrap_or_else(|_| PathBuf::from(&x))
+        })
+        .unwrap_or_else(|| project_path.join("build"));
+
+    build(
+        env,
+        &project_path,
+        target_triple,
+        Some(vec!["resources".to_string()]),
+        vars,
+        release,
+        verbose,
+    )
+    .context("building Python embedding artifacts")?;
+
+    // Second stage: build the crate's binary against those artifacts.
+    //
+    // This runs the same two steps the CI scripts perform by hand: evaluate
+    // the embedding artifacts, then build with PYO3_CONFIG_FILE pointing at
+    // them. cargo is taken from PATH, like it is elsewhere in this repository.
+    let target_triple = resolve_target(target_triple)?;
+
+    let profile = if release { "release" } else { "debug" };
+
+    // The artifacts of a target whose build path is <BUILD_PATH> land in
+    // <BUILD_PATH>/<triple>/<profile>/resources/pyo3-build-config-file.txt.
+    // Look for exactly that, then fall back to a bounded search in case the
+    // target layout shifts between pyoxidizer versions.
+    let artifacts_dir = find_pyo3_config_dir(&build_dir);
+    let artifacts_dir = match artifacts_dir {
+        Some(dir) => dir,
+        None => {
+            return Err(anyhow!(
+                "the resources target of {} did not write a pyo3-build-config-file.txt under {}",
+                project_path.display(),
+                build_dir.display()
+            ));
+        }
+    };
+
+    let pyo3_config = artifacts_dir
+        .join("resources")
+        .join("pyo3-build-config-file.txt");
+
+    let bin_name = "pyoxy";
+
+    // Cargo will rebuild when PYO3_CONFIG_FILE changes thanks to
+    // `cargo:rerun-if-env-changed` in the crate's build script, so repeated
+    // invocations with a different --python-version do produce a rebuild.
+    // --target-dir pins the output location: the crate may be a workspace
+    // member, in which case cargo's default target directory is the
+    // workspace's, not the project's.
+    let exe_path = project_path
+        .join("target")
+        .join(&target_triple)
+        .join(profile)
+        .join(exe_name_file_with_suffix(bin_name, &target_triple));
+
+    let mut cmd_args = vec![
+        "build".to_string(),
+        "--target".to_string(),
+        target_triple.to_string(),
+        "--bin".to_string(),
+        bin_name.to_string(),
+        "--target-dir".to_string(),
+        project_path.join("target").display().to_string(),
+    ];
+
+    if with_shell(|log| log.out_supports_color()) {
+        cmd_args.push("--color=always".to_string());
+    }
+
+    if release {
+        cmd_args.push("--release".to_string());
+    }
+
+    let mut env_vars: HashMap<String, String> = std::env::vars().collect();
+    env_vars.insert(
+        "PYO3_CONFIG_FILE".to_string(),
+        pyo3_config.display().to_string(),
+    );
+
+    let command = cmd("cargo", &cmd_args)
+        .full_env(env_vars)
+        .dir(project_path)
+        .stderr_to_stdout()
+        .unchecked()
+        .reader()
+        .context("invoking cargo command")?;
+
+    {
+        let reader = BufReader::new(&command);
+        for line in reader.lines() {
+            let _ = log::warn!("{}", line.context("reading cargo output")?);
+        }
+    }
+
+    let output = command
+        .try_wait()
+        .context("waiting on cargo process")?
+        .ok_or_else(|| anyhow!("unable to wait on command"))?;
+
+    if !output.status.success() {
+        return Err(anyhow!("cargo build failed"));
+    }
+
+    if !exe_path.exists() {
+        return Err(anyhow!(
+            "cargo build did not produce an executable at {}",
+            exe_path.display()
+        ));
+    }
+
+    create_dir_all(dest_path)
+        .with_context(|| format!("creating destination directory {}", dest_path.display()))?;
+
+    let dest_exe = dest_path.join(exe_name_file_with_suffix(&exe_name, &target_triple));
+
+    std::fs::copy(&exe_path, &dest_exe)
+        .with_context(|| format!("copying executable to {}", dest_exe.display()))?;
+
+    println!("wrote {}", dest_exe.display());
+    println!("artifacts: {}", artifacts_dir.display());
+
+    Ok(())
+}
+
+/// Return the file name `exe_name` should have for `target_triple`.
+fn exe_name_file_with_suffix(exe_name: &str, target_triple: &str) -> String {
+    if target_triple.contains("windows") {
+        format!("{}.exe", exe_name)
+    } else {
+        exe_name.to_string()
+    }
+}
+
+/// Find the directory under `build_dir` containing a `resources/`
+/// `pyo3-build-config-file.txt`, preferring depth over breadth.
+///
+/// The regular layout is `<build>/<triple>/<profile>/resources/`, but the
+/// depth-limited walk keeps this working if the intermediate directory names
+/// change. Returns None when nothing was found.
+fn find_pyo3_config_dir(build_dir: &Path) -> Option<PathBuf> {
+    const MAX_DEPTH: usize = 4;
+
+    fn walk(dir: &Path, depth: usize, found: &mut Option<PathBuf>) -> bool {
+        if found.is_some() {
+            return true;
+        }
+
+        if depth > MAX_DEPTH {
+            return false;
+        }
+
+        // Configuration directories are always resolved targets; profile dirs
+        // sort deterministically and a single project has one artifacts dir.
+        if dir.join("resources").join("pyo3-build-config-file.txt").exists() {
+            *found = Some(dir.to_path_buf());
+            return true;
+        }
+
+        let mut entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries
+                .filter_map(|x| x.ok().map(|e| e.path()))
+                .filter(|p| p.is_dir())
+                .collect::<Vec<_>>(),
+            Err(_) => return false,
+        };
+        // Bubble the newest profile first, mirroring release selection after a
+        // fresh run, but stay deterministic otherwise.
+        entries.sort();
+        entries.reverse();
+
+        for entry in entries {
+            if walk(&entry, depth + 1, found) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    let mut found: Option<PathBuf> = None;
+    walk(build_dir, 0, &mut found);
+    found
 }
 
 pub fn python_distribution_extract(

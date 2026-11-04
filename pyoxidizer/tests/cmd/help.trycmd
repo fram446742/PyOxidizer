@@ -7,6 +7,8 @@ Commands:
   build        Build a PyOxidizer project
   run          Build and run a target in a configuration file
   python       Build a standalone, self-contained Python interpreter
+  pyoxy        Build a self-contained pyoxy Python runner executable
+  package      Write one packed resources file per Python package
   cache-clear  Clear PyOxidizer's user-specific cache
   completions  Print a shell completion script
   dist         Inspect and extract Python distributions
@@ -26,6 +28,14 @@ Common tasks:
   Build a standalone Python interpreter in one command
       $ pyoxidizer python --dest ./out
       $ ./out/python -c 'import sys; print(sys.version)'
+
+  Build the self-contained pyoxy runner
+      $ pyoxidizer pyoxy --path pyoxy --dest .
+      $ ./pyoxy -c 'import sys; print(sys.version)'
+
+  Ship third-party libraries next to a runner, one file per package
+      $ pyoxidizer package --dest pyoxy-modules requests
+      $ ./pyoxy -c 'import requests; print(requests.__version__)'
 
   Create a project you can configure, then build it
       $ pyoxidizer init config myapp
@@ -59,6 +69,8 @@ Commands:
   build        Build a PyOxidizer project
   run          Build and run a target in a configuration file
   python       Build a standalone, self-contained Python interpreter
+  pyoxy        Build a self-contained pyoxy Python runner executable
+  package      Write one packed resources file per Python package
   cache-clear  Clear PyOxidizer's user-specific cache
   completions  Print a shell completion script
   dist         Inspect and extract Python distributions
@@ -89,6 +101,14 @@ Common tasks:
   Build a standalone Python interpreter in one command
       $ pyoxidizer python --dest ./out
       $ ./out/python -c 'import sys; print(sys.version)'
+
+  Build the self-contained pyoxy runner
+      $ pyoxidizer pyoxy --path pyoxy --dest .
+      $ ./pyoxy -c 'import sys; print(sys.version)'
+
+  Ship third-party libraries next to a runner, one file per package
+      $ pyoxidizer package --dest pyoxy-modules requests
+      $ ./pyoxy -c 'import requests; print(requests.__version__)'
 
   Create a project you can configure, then build it
       $ pyoxidizer init config myapp
@@ -785,6 +805,8 @@ Commands:
   build        Build a PyOxidizer project
   run          Build and run a target in a configuration file
   python       Build a standalone, self-contained Python interpreter
+  pyoxy        Build a self-contained pyoxy Python runner executable
+  package      Write one packed resources file per Python package
   cache-clear  Clear PyOxidizer's user-specific cache
   completions  Print a shell completion script
   dist         Inspect and extract Python distributions
@@ -815,6 +837,14 @@ Common tasks:
   Build a standalone Python interpreter in one command
       $ pyoxidizer python --dest ./out
       $ ./out/python -c 'import sys; print(sys.version)'
+
+  Build the self-contained pyoxy runner
+      $ pyoxidizer pyoxy --path pyoxy --dest .
+      $ ./pyoxy -c 'import sys; print(sys.version)'
+
+  Ship third-party libraries next to a runner, one file per package
+      $ pyoxidizer package --dest pyoxy-modules requests
+      $ ./pyoxy -c 'import requests; print(requests.__version__)'
 
   Create a project you can configure, then build it
       $ pyoxidizer init config myapp

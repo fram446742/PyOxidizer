@@ -52,6 +52,51 @@ write a configuration file with `pyoxidizer init config` and build it with
 `pyoxidizer build` instead.
 ";
 
+const PYOXY_ABOUT: &str = "\
+Build a self-contained pyoxy Python runner executable.
+
+A pyoxy executable statically links a Python distribution, embeds its
+standard library, and behaves like a `python` executable; see the pyoxy
+documentation for its runner features.
+
+The project directory (--path, default: the current directory) must contain
+a pyoxidizer.bzl defining a `resources` target that emits Python embedding
+artifacts, and a Cargo crate defining a `pyoxy` binary that consumes them:
+this command runs the equivalent of:
+
+    pyoxidizer build --path DIR --target TRIPLE resources
+    cargo build --bin pyoxy --target TRIPLE   # with PYO3_CONFIG_FILE set
+    cp BUILD_PATH/<triple>/<profile>/pyoxy --dest
+
+Starlark variables are honored (--var): `PYTHON_VERSION` selects the
+distribution and `REQUIREMENTS` bakes third-party packages into the single
+executable, e.g.
+
+    pyoxidizer pyoxy --path pyoxy --var REQUIREMENTS \"requests lxml\"
+
+To obtain per-package files for the `pyoxy-modules` loader instead - one
+file per package, addable and removable without rebuilding anything - use
+`pyoxidizer package`.
+";
+
+const PACKAGE_ABOUT: &str = "\
+Write one packed resources file per Python package.
+
+For the given requirements, pip resolves each package and its dependencies
+and every resolved wheel is classified and serialized to its own
+`<name>.packed-resources` file in --dest. Output files are platform
+independent as long as wheels are pure Python; C extension modules and
+files that cannot be exported are skipped with a warning.
+
+The files can be loaded from memory:
+
+* by a pyoxy executable: copy the file into the `pyoxy-modules` directory
+  next to the executable (creating it if needed) and the library becomes
+  importable; deleting the file removes it again.
+* by any pyembed embedding: list the file in the `packed_resources` field
+  of an interpreter configuration.
+";
+
 const INIT_RUST_PROJECT_ABOUT: &str = "\
 Create a new Rust project embedding Python.
 
@@ -244,6 +289,14 @@ Common tasks:
   Build a standalone Python interpreter in one command
       $ pyoxidizer python --dest ./out
       $ ./out/python -c 'import sys; print(sys.version)'
+
+  Build the self-contained pyoxy runner
+      $ pyoxidizer pyoxy --path pyoxy --dest .
+      $ ./pyoxy -c 'import sys; print(sys.version)'
+
+  Ship third-party libraries next to a runner, one file per package
+      $ pyoxidizer package --dest pyoxy-modules requests
+      $ ./pyoxy -c 'import requests; print(requests.__version__)'
 
   Create a project you can configure, then build it
       $ pyoxidizer init config myapp
@@ -477,6 +530,66 @@ fn cmd_python() -> Command {
                     .long("release")
                     .action(ArgAction::SetTrue)
                     .help("Build a release binary"),
+            ),
+    )
+}
+
+fn cmd_pyoxy() -> Command {
+    add_env_args(
+        Command::new("pyoxy")
+            .about("Build a self-contained pyoxy Python runner executable")
+            .long_about(PYOXY_ABOUT)
+            .arg(arg_target_triple(false))
+            .arg(
+                Arg::new("release")
+                    .long("release")
+                    .action(ArgAction::SetTrue)
+                    .help("Build a release binary"),
+            )
+            .arg(arg_project_path(
+                "Directory containing the pyoxy project to build",
+            ))
+            .arg(
+                Arg::new("dest_path")
+                    .long("dest")
+                    .action(ArgAction::Set)
+                    .value_parser(value_parser!(PathBuf))
+                    .value_name("DIR")
+                    .default_value(".")
+                    .help("Directory to write the built executable to"),
+            )
+            .arg(
+                Arg::new("name")
+                    .long("name")
+                    .action(ArgAction::Set)
+                    .value_name("NAME")
+                    .default_value("pyoxy")
+                    .help("File name to write the executable as"),
+            ),
+    )
+}
+
+fn cmd_package() -> Command {
+    add_python_distribution_args(
+        Command::new("package")
+            .about("Write one packed resources file per Python package")
+            .long_about(PACKAGE_ABOUT)
+            .arg(
+                Arg::new("dest_path")
+                    .long("dest")
+                    .action(ArgAction::Set)
+                    .value_parser(value_parser!(PathBuf))
+                    .value_name("DIR")
+                    .default_value(".")
+                    .help("Directory to write the packed resources files to"),
+            )
+            .arg(
+                Arg::new("requirements")
+                    .action(ArgAction::Append)
+                    .num_args(1..)
+                    .value_name("REQ")
+                    .required(true)
+                    .help("Requirements pip can resolve, e.g. `requests` or `lxml>=5`"),
             ),
     )
 }
@@ -889,6 +1002,8 @@ pub fn run_cli() -> Result<()> {
         .subcommand(cmd_build())
         .subcommand(cmd_run())
         .subcommand(cmd_python())
+        .subcommand(cmd_pyoxy())
+        .subcommand(cmd_package())
         .subcommand(cmd_cache_clear("cache-clear"))
         .subcommand(cmd_completions());
 
@@ -1150,6 +1265,52 @@ pub fn run_cli() -> Result<()> {
                 flavor,
                 python_version.map(|x| x.as_str()),
                 release,
+                verbose,
+            )
+        }
+
+        "pyoxy" => {
+            let starlark_vars = starlark_vars(args)?;
+            let target_triple = args.get_one::<String>("target_triple");
+            let release = args.get_flag("release");
+            let path = args.get_one::<PathBuf>("path").unwrap();
+            let dest_path = args.get_one::<PathBuf>("dest_path").unwrap();
+            let name = args.get_one::<String>("name").unwrap();
+
+            projectmgmt::build_pyoxy_runner(
+                &env,
+                path,
+                dest_path,
+                name,
+                target_triple.map(|x| x.as_str()),
+                starlark_vars,
+                release,
+                verbose,
+            )
+        }
+
+        "package" => {
+            let target_triple = args
+                .get_one::<String>("target_triple")
+                .expect("target_triple should have default");
+            let flavor = args
+                .get_one::<String>("flavor")
+                .expect("flavor should have default");
+            let python_version = args.get_one::<String>("python_version");
+            let dest_path = args.get_one::<PathBuf>("dest_path").unwrap();
+            let requirements = args
+                .get_many::<String>("requirements")
+                .unwrap_or_default()
+                .cloned()
+                .collect::<Vec<_>>();
+
+            projectmgmt::python_package_generate_packed_resources(
+                &env,
+                dest_path,
+                &requirements,
+                target_triple,
+                flavor,
+                python_version.map(|x| x.as_str()),
                 verbose,
             )
         }

@@ -7,7 +7,7 @@ docs/pyembed*
 docs/pyoxidizer*
 docs/pyoxy*
 docs/tugger*
-# Output of `just python` and `just pyoxy-python`.
+# Output of `just python` and `just pyoxy`.
 /python
 dist/
 pyembed/docs/_build/

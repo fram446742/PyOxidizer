@@ -4,23 +4,26 @@
 Running YAML Based Applications
 ===============================
 
-The ``pyoxy run-yaml`` command enables you to run a Python interpreter given
+The ``pyoxy --yaml`` option enables you to run a Python interpreter given
 a configuration defined in a YAML file.
 
 Usage
 =====
 
-Run ``pyoxy help run-yaml`` to see full documentation.
+Run ``pyoxy --runner-help`` to see full documentation.
 
 The high-level operation is::
 
-   pyoxy run-yaml [FILE] [-- <args>...]
+   pyoxy --yaml [FILE] [args...]
 
-You give the command the path to a YAML file to parse and optional additional
-arguments following a ``--``. e.g.::
+You give the runner the path to a YAML file to parse, and every following
+argument is handed to the interpreter. e.g.::
 
-   pyoxy run-yaml myapp.yaml
-   pyoxy run-yaml myapp.yaml -- --arg true
+   pyoxy --yaml myapp.yaml
+   pyoxy --yaml myapp.yaml --arg true
+
+The deprecated ``run-yaml`` subcommand is still accepted: ``pyoxy run-yaml
+myapp.yaml -- --arg true`` behaves like ``pyoxy --yaml myapp.yaml --arg true``.
 
 File Parsing
 ============
@@ -41,6 +44,11 @@ YAML Configuration
 The YAML document attempts to deserialize to a ``pyembed::OxidizedPythonInterpreterConfig``
 Rust struct. This type and its fields are extensively documented at
 :ref:`pyoxy_struct_OxidizedPythonInterpreterConfig`.
+
+The configuration can also list additional packed resources files to import
+libraries from, via the ``packed_resources`` field. In practice this is rarely
+needed: every ``*.packed-resources`` file in a ``pyoxy-modules`` directory next
+to the executable (see :ref:`pyoxy_overview`) is loaded automatically.
 
 Some of the most important fields in the configuration data structure define
 what to run when the interpreter starts. e.g.
@@ -63,7 +71,7 @@ Portable Invocation Using a Shell Shebang
 =========================================
 
 On UNIX-like platforms, files containing an embedded YAML config can be
-made to execute with ``pyoxy run-yaml`` by using a specially crafted shebang
+made to execute with ``pyoxy --yaml`` by using a specially crafted shebang
 (leading ``#!`` line) and making the file executable.
 
 For example, say you distribute the ``pyoxy`` binary in the same directory
@@ -72,13 +80,13 @@ as your executable ``myapp`` file. Here's what ``myapp`` would look like:
 .. code-block::
 
    #!/bin/sh
-   "exec" "`dirname $0`/pyoxy" run-yaml "$0" -- "$@"
+   "exec" "`dirname $0`/pyoxy" --yaml "$0" "$@"
    ---
    # YAML configuration.
    ...
 
 This file defines a shell script which simply calls ``exec`` to invoke
-``pyoxy run-yaml``, giving it the path to the current file and additional
+``pyoxy --yaml``, giving it the path to the current file and additional
 arguments passed to the original invocation. Because our custom YAML parsing
 ignores content up to the first line beginning with ``---``, the shebang
 and shell script content is ignored and the file evaluates as if those initial

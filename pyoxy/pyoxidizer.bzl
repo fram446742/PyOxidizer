@@ -4,6 +4,10 @@
 BUILD_PATH = VARS.get("BUILD_PATH", CWD + "/build")
 PYTHON_VERSION = VARS.get("PYTHON_VERSION", "3.10")
 
+# Space separated Python requirements to embed in the produced resources.
+# e.g. --var REQUIREMENTS "requests pyyaml". Empty by default.
+REQUIREMENTS = VARS.get("REQUIREMENTS", "")
+
 set_build_path(BUILD_PATH)
 
 
@@ -17,10 +21,34 @@ def make_resources():
     policy.include_distribution_resources = True
     policy.resources_location = "in-memory"
 
+    # Emit bytecode for every optimization level. Without the -O1 and -O2
+    # variants, imports performed during interpreter startup fail when the
+    # executable is invoked with -O or -OO. Mirrors the standalone Python
+    # template used by `pyoxidizer python`.
+    policy.bytecode_optimize_level_zero = True
+    policy.bytecode_optimize_level_one = True
+    policy.bytecode_optimize_level_two = True
+
     exe = dist.to_python_executable(
         name="pyoxy",
         packaging_policy=policy,
     )
+
+    if REQUIREMENTS:
+        # One pip invocation for every requirement so shared dependencies are
+        # resolved and installed exactly once.
+        resources = exe.pip_install(REQUIREMENTS.split())
+
+        # A packed resources blob loaded from memory cannot carry extension
+        # modules or untyped files. Like `pyoxidizer package`, those are
+        # skipped so e.g. requests embeds despite its C accelerator wheels.
+        resources = [
+            r
+            for r in resources
+            if type(r) not in ("PythonExtensionModule", "File")
+        ]
+
+        exe.add_python_resources(resources)
 
     exe.add_cargo_manifest_licensing(CWD + "/Cargo.toml")
 

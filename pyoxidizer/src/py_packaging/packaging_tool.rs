@@ -59,36 +59,29 @@ pub fn find_resources<'a>(
     Ok(res)
 }
 
-/// Run `pip download` and collect resources found from downloaded packages.
+/// Run `pip download` and return the resources of each downloaded wheel,
+/// grouped by wheel.
 ///
-/// `host_dist` is the Python distribution to use to run `pip`.
-///
-/// `build_dist` is the Python distribution that packages are being downloaded
-/// for.
-///
-/// The distributions are often the same. But passing a different
-/// distribution targeting a different platform allows this command to
-/// resolve resources for a non-native platform, which enables it to be used
-/// when cross-compiling.
-pub fn pip_download<'a>(
+/// `host_dist` is the Python distribution used to run `pip`; `build_dist` the
+/// distribution the resources are being packaged for. The grouping name is the
+/// wheel's distribution segment, e.g. `requests` for
+/// `requests-2.32.3-py3-none-any.whl`, so callers can write one packed
+/// resources file per pip package, including transitive dependencies.
+pub fn pip_download_wheel_resources<'a>(
     env: &Environment,
     host_dist: &dyn PythonDistribution,
     target_dist: &dyn PythonDistribution,
     policy: &PythonPackagingPolicy,
     verbose: bool,
     args: &[String],
-) -> Result<Vec<PythonResource<'a>>> {
+) -> Result<Vec<(String, Vec<PythonResource<'a>>)>> {
     let temp_dir = env.temporary_directory("pyoxidizer-pip-download")?;
 
     host_dist.ensure_pip()?;
 
     let target_dir = temp_dir.path();
 
-    with_concise_shell(|log| {
-        log.status(
-            "Downloading", "dependencies with pip"
-        )
-    })?;
+    with_concise_shell(|log| log.status("Downloading", "dependencies with pip"))?;
     with_verbose_shell(|log| {
         log.status(
             "Downloading",
@@ -122,7 +115,11 @@ pub fn pip_download<'a>(
         [] => vec![target_dist.python_platform_compatibility_tag().to_string()],
         tags => tags.to_vec(),
     };
-    pip_args.extend(platform_tags.iter().map(|tag| format!("--platform={}", tag)));
+    pip_args.extend(
+        platform_tags
+            .iter()
+            .map(|tag| format!("--platform={}", tag)),
+    );
 
     pip_args.extend(vec![
         format!("--python-version={}", target_dist.python_version()),
@@ -138,9 +135,7 @@ pub fn pip_download<'a>(
 
     pip_args.extend(args.iter().cloned());
 
-    with_verbose_shell(|log| {
-        log.status("Running", format!("python {:?}", pip_args))
-    })?;
+    with_verbose_shell(|log| log.status("Running", format!("python {:?}", pip_args)))?;
 
     let force_color = with_shell(|log| log.out_supports_color());
     let command = cmd(host_dist.python_exe_path(), &pip_args)
@@ -150,7 +145,8 @@ pub fn pip_download<'a>(
         command.env("FORCE_COLOR", "1")
     } else {
         command
-    }.reader()?;
+    }
+    .reader()?;
 
     log_command_output(&command);
 
@@ -163,28 +159,72 @@ pub fn pip_download<'a>(
 
     // Since we used --only-binary=:all: above, we should only have .whl files
     // in the destination directory. Iterate over them and collect resources
-    // from each.
-
+    // from each, keeping wheels independent so one packed resources file per
+    // pip package can be written.
     let mut files = std::fs::read_dir(target_dir)?
         .map(|entry| Ok(entry?.path()))
         .collect::<Result<Vec<_>>>()?;
     files.sort();
 
-    // TODO there's probably a way to do this using iterators.
     let mut res = Vec::new();
 
     for path in &files {
         let wheel = WheelArchive::from_path(path)?;
 
-        res.extend(wheel.python_resources(
+        let resources = wheel.python_resources(
             target_dist.cache_tag(),
             &target_dist.python_module_suffixes()?,
             policy.file_scanner_emit_files(),
             policy.file_scanner_classify_files(),
-        )?);
+        )?;
+
+        let group_name = path
+            .file_name()
+            .ok_or_else(|| anyhow!("could not derive file name"))?
+            .to_string_lossy()
+            .strip_suffix(".whl")
+            .ok_or_else(|| anyhow!("{} is not a wheel", path.display()))?
+            // The wheel naming grammar puts the distribution before the first
+            // `-`; it may contain underscores but not hyphens.
+            .split('-')
+            .next()
+            .ok_or_else(|| anyhow!("empty wheel name"))?
+            .to_string();
+
+        res.push((group_name, resources));
     }
 
     temp_dir.close().context("closing temporary directory")?;
+
+    Ok(res)
+}
+
+/// Run `pip download` and collect resources found from downloaded packages.
+///
+/// `host_dist` is the Python distribution to use to run `pip`.
+///
+/// `build_dist` is the Python distribution that packages are being downloaded
+/// for.
+///
+/// The distributions are often the same. But passing a different
+/// distribution targeting a different platform allows this command to
+/// resolve resources for a non-native platform, which enables it to be used
+/// when cross-compiling.
+pub fn pip_download<'a>(
+    env: &Environment,
+    host_dist: &dyn PythonDistribution,
+    target_dist: &dyn PythonDistribution,
+    policy: &PythonPackagingPolicy,
+    verbose: bool,
+    args: &[String],
+) -> Result<Vec<PythonResource<'a>>> {
+    let wheels = pip_download_wheel_resources(env, host_dist, target_dist, policy, verbose, args)?;
+
+    let mut res = Vec::new();
+
+    for (_, resources) in wheels {
+        res.extend(resources);
+    }
 
     Ok(res)
 }
