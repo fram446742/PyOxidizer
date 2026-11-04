@@ -51,7 +51,7 @@ def make_resources():
         skipped = len(resources) - len(kept)
         if skipped:
             print(
-                "pyoxy: skipping {} resource(s) that cannot be loaded from memory".format(skipped)
+                "pyoxy: {} resource(s) skipped; the baked executable may be missing modules - check imports".format(skipped)
             )
 
         exe.add_python_resources(kept)

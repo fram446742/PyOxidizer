@@ -553,10 +553,14 @@ pub fn python_package_generate_packed_resources(
     let mut compiler = BytecodeCompiler::new(dist.python_exe_path(), compiler_temp.path())?;
 
     let python_version = dist.python_major_minor_version();
-    let mut skipped_extension_modules = 0;
-    let mut skipped_files = 0;
+    let package_count = wheels.len();
+    // (package, C extension modules, untyped files) whose output is partial.
+    let mut incomplete: Vec<(String, usize, usize)> = Vec::new();
 
     for (name, resources) in wheels {
+        let mut skipped_extension_modules = 0;
+        let mut skipped_files = 0;
+
         let mut collector = PythonResourceCollector::new(
             vec![AbstractResourceLocation::InMemory],
             // Extension modules are never written; keep the policy closed so
@@ -596,10 +600,12 @@ pub fn python_package_generate_packed_resources(
                             "untyped file"
                         }
                     };
-                    warn!(
-                        "skipping {} from {} because it cannot be loaded from memory",
-                        kind, name
-                    );
+                    if verbose {
+                        warn!(
+                            "skipping {} from {} because it cannot be loaded from memory",
+                            kind, name
+                        );
+                    }
                 }
                 _ => {
                     return Err(anyhow!(
@@ -650,24 +656,66 @@ pub fn python_package_generate_packed_resources(
             .with_context(|| format!("writing {}", metadata_file.display()))?;
 
         println!("wrote {}", dest_file.display());
+
+        // Say per package what the file is missing: the package may still
+        // import, so the omission is invisible until something needs it.
+        if skipped_extension_modules + skipped_files > 0 {
+            println!(
+                "  incomplete: {} skipped",
+                describe_skipped(skipped_extension_modules, skipped_files)
+            );
+            incomplete.push((name, skipped_extension_modules, skipped_files));
+        }
     }
 
     compiler_temp
         .close()
         .context("closing temporary directory")?;
 
-    // Warnings scroll by in a long build; summarize so a package whose C
-    // accelerator was dropped is not mistaken for fully packaged.
-    if skipped_extension_modules + skipped_files > 0 {
+    // A verdict, not just counts: some packages only lose an optional
+    // accelerator, others lose a module they cannot work without, and only
+    // the caller can tell which. Naming them makes the check one command.
+    if incomplete.is_empty() {
         println!(
-            "skipped {} resource(s) that cannot be loaded from memory: {} C extension module(s), {} untyped file(s)",
-            skipped_extension_modules + skipped_files,
-            skipped_extension_modules,
-            skipped_files
+            "packaging complete: {} package(s), nothing was skipped",
+            package_count
+        );
+    } else {
+        incomplete.sort();
+        println!(
+            "packaging incomplete: {} of {} package(s) are missing resources",
+            incomplete.len(),
+            package_count
+        );
+
+        for (name, extension_modules, files) in &incomplete {
+            println!(
+                "  {name}: {} skipped",
+                describe_skipped(*extension_modules, *files)
+            );
+        }
+
+        println!(
+            "A package that needs a skipped module fails at import; check with: pyoxy -c 'import <package>'"
         );
     }
 
     Ok(())
+}
+
+/// Human readable count of the resources a package lost, e.g.
+/// `1 C extension module, 2 untyped files`.
+fn describe_skipped(extension_modules: usize, files: usize) -> String {
+    let mut parts = Vec::new();
+
+    if extension_modules > 0 {
+        parts.push(format!("{} C extension module(s)", extension_modules));
+    }
+    if files > 0 {
+        parts.push(format!("{} untyped file(s)", files));
+    }
+
+    parts.join(", ")
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -62,8 +62,11 @@ it, and no rebuild is required either way. Files without the
 ``.packed-resources`` suffix in that directory are ignored.
 
 Since the resources are loaded from memory, resources that cannot be loaded
-that way - C extension modules and untyped files - are skipped with a warning,
-and the total skipped is summarized at the end: pure Python packages are the
+that way - C extension modules and untyped files - are skipped. Each affected
+package reports an incomplete file and the command ends with a
+``packaging complete`` / ``packaging incomplete`` verdict naming it. Modules
+loaded this way also have no ``__file__``, so packages that read it at import
+time fail with ``NameError``; pure Python packages that avoid both are the
 sweet spot for this mechanism.
 
 Each file is accompanied by a ``<name>.packed-resources.json`` sidecar recording

@@ -143,9 +143,21 @@ Result: one file containing interpreter, standard library and packages.
 
 **Constraint of both ways:** resources are loaded from memory, so anything
 that cannot load that way — C extension modules and untyped files — is
-skipped with a warning at generation time, and the number skipped is
-summarized at the end of the command (a package whose C accelerator was
-dropped still imports, so its absence is otherwise easy to miss). Pure Python packages
+skipped at generation time: each package whose file is partial says so, and
+the command ends with a `packaging complete` / `packaging incomplete` verdict
+naming the affected packages (a package that only lost an optional C
+accelerator still imports, so its absence is otherwise easy to miss).
+
+Two independent limits are worth knowing before choosing a package:
+
+* Resources are loaded from memory, so modules have no `__file__`. Packages
+  that read it at import time fail with `NameError: name '__file__' is not
+  defined`. pyocd is an example.
+* A skipped C extension module may be required rather than optional:
+  `pyyaml` and `wcwidth` fall back to pure Python, `capstone`, `cffi`,
+  `psutil` and `cmsis-pack-manager` do not. The verdict only tells you which
+  packages were affected, so check the imports you need with
+  `pyoxy -c 'import <package>'`. Pure Python packages
 (`requests`, `click`, `attrs`, `pyyaml`, ...) are the sweet spot; a package
 whose optional C accelerator is skipped still imports and works, just
 without the accelerated path (e.g. `charset_normalizer` behind `requests`).

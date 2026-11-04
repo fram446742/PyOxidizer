@@ -116,8 +116,9 @@ For the given requirements, pip resolves each package and its dependencies
 and every resolved wheel is classified and serialized to its own
 `<name>.packed-resources` file in --dest. Output files are platform
 independent as long as wheels are pure Python; C extension modules and
-files that cannot be exported are skipped with a warning, and a summary of
-what was skipped is printed at the end.
+files that cannot be exported are skipped, each package says so when its
+file is incomplete, and a final verdict names the packages that lost
+resources. Use --verbose for the individual skipped modules.
 
 Each file is accompanied by a `<name>.packed-resources.json` recording the
 Python version and target triple it was built for. A pyoxy executable skips
