@@ -20,7 +20,7 @@ use {
         collections::{hash_map::RandomState, HashMap},
         hash::BuildHasher,
         io::{BufRead, BufReader},
-        path::Path,
+        path::{Path, PathBuf},
     },
 };
 
@@ -67,14 +67,14 @@ pub fn find_resources<'a>(
 /// wheel's distribution segment, e.g. `requests` for
 /// `requests-2.32.3-py3-none-any.whl`, so callers can write one packed
 /// resources file per pip package, including transitive dependencies.
-pub fn pip_download_wheel_resources<'a>(
+pub fn pip_download_wheels(
     env: &Environment,
     host_dist: &dyn PythonDistribution,
     target_dist: &dyn PythonDistribution,
     policy: &PythonPackagingPolicy,
     verbose: bool,
     args: &[String],
-) -> Result<Vec<(String, Vec<PythonResource<'a>>)>> {
+) -> Result<(tempfile::TempDir, Vec<(String, PathBuf)>)> {
     let temp_dir = env.temporary_directory("pyoxidizer-pip-download")?;
 
     host_dist.ensure_pip()?;
@@ -156,28 +156,14 @@ pub fn pip_download_wheel_resources<'a>(
     if !output.status.success() {
         return Err(anyhow!("error running pip"));
     }
-
-    // Since we used --only-binary=:all: above, we should only have .whl files
-    // in the destination directory. Iterate over them and collect resources
-    // from each, keeping wheels independent so one packed resources file per
-    // pip package can be written.
     let mut files = std::fs::read_dir(target_dir)?
         .map(|entry| Ok(entry?.path()))
         .collect::<Result<Vec<_>>>()?;
     files.sort();
 
-    let mut res = Vec::new();
+    let mut wheels = Vec::new();
 
     for path in &files {
-        let wheel = WheelArchive::from_path(path)?;
-
-        let resources = wheel.python_resources(
-            target_dist.cache_tag(),
-            &target_dist.python_module_suffixes()?,
-            policy.file_scanner_emit_files(),
-            policy.file_scanner_classify_files(),
-        )?;
-
         let group_name = path
             .file_name()
             .ok_or_else(|| anyhow!("could not derive file name"))?
@@ -191,7 +177,38 @@ pub fn pip_download_wheel_resources<'a>(
             .ok_or_else(|| anyhow!("empty wheel name"))?
             .to_string();
 
-        res.push((group_name, resources));
+        wheels.push((group_name, path.clone()));
+    }
+
+    // The caller owns the directory: unpacking needs the wheels on disk.
+    Ok((temp_dir, wheels))
+}
+
+/// Run `pip download` and collect the resources of each downloaded wheel.
+pub fn pip_download_wheel_resources<'a>(
+    env: &Environment,
+    host_dist: &dyn PythonDistribution,
+    target_dist: &dyn PythonDistribution,
+    policy: &PythonPackagingPolicy,
+    verbose: bool,
+    args: &[String],
+) -> Result<Vec<(String, Vec<PythonResource<'a>>)>> {
+    let (temp_dir, wheels) =
+        pip_download_wheels(env, host_dist, target_dist, policy, verbose, args)?;
+
+    let mut res = Vec::new();
+
+    for (group_name, path) in &wheels {
+        let wheel = WheelArchive::from_path(path)?;
+
+        let resources = wheel.python_resources(
+            target_dist.cache_tag(),
+            &target_dist.python_module_suffixes()?,
+            policy.file_scanner_emit_files(),
+            policy.file_scanner_classify_files(),
+        )?;
+
+        res.push((group_name.clone(), resources));
     }
 
     temp_dir.close().context("closing temporary directory")?;

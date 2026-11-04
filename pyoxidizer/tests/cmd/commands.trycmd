@@ -122,8 +122,10 @@ resources. Use --verbose for the individual skipped modules.
 
 Extension modules cannot be loaded from a packed resources file on Linux
 (in-memory shared library loading is Windows-only), so packages that need
-their .so - numpy, pandas, psutil - remain unusable this way no matter how
-the files are split.
+their .so - numpy, pandas, psutil - are unusable in that form. Use --unpack
+for those: each wheel is written to its own directory of real files instead
+of a packed file, and the runner imports from there, which also gives
+modules a real __file__.
 
 Each file is accompanied by a `<name>.packed-resources.json` recording the
 Python version and target triple it was built for. A pyoxy executable skips
@@ -156,21 +158,24 @@ Options:
           
           [env: PYOXIDIZER_SYSTEM_RUST=]
 
+      --unpack
+          Write each package as a directory of real files instead of a packed resources file
+
+  -v, --verbose...
+          Increase logging verbosity. Can be specified multiple times
+
+  -q, --quiet
+          Suppress all logging. Takes precedence over --verbose
+
       --target-triple <TRIPLE>
           Rust target triple to use
           
           [default: x86_64-unknown-linux-gnu]
 
-  -v, --verbose...
-          Increase logging verbosity. Can be specified multiple times
-
       --flavor <FLAVOR>
           Python distribution flavor
           
           [default: standalone]
-
-  -q, --quiet
-          Suppress all logging. Takes precedence over --verbose
 
       --python-version <X.Y>
           Python version (X.Y) to use

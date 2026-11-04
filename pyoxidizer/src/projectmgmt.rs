@@ -18,7 +18,7 @@ use {
                 default_distribution_location, resolve_distribution,
                 resolve_python_distribution_archive,
             },
-            packaging_tool::pip_download_wheel_resources,
+            packaging_tool::{pip_download_wheel_resources, pip_download_wheels},
             standalone_distribution::StandaloneDistribution,
         },
         python_distributions::PYTHON_DISTRIBUTIONS,
@@ -726,6 +726,133 @@ fn describe_skipped(extension_modules: usize, files: usize) -> String {
     }
 
     parts.join(", ")
+}
+
+/// Write each resolved wheel's files to its own directory under `dest_path`.
+///
+/// This is the filesystem counterpart of `python_package_generate_packed_resources`:
+/// the runner adds `<dest>/<name>` to `sys.path`, so modules load from real
+/// files. That is what packages needing C extension modules or a real
+/// `__file__` require, since packed resources can only be loaded from memory.
+#[allow(clippy::too_many_arguments)]
+pub fn python_package_unpack_wheels(
+    env: &Environment,
+    dest_path: &Path,
+    requirements: &[String],
+    target_triple: &str,
+    flavor: &str,
+    python_version: Option<&str>,
+    verbose: bool,
+) -> Result<()> {
+    if requirements.is_empty() {
+        return Err(anyhow!("no requirements to package"));
+    }
+
+    let distribution_location = default_distribution_location(
+        &DistributionFlavor::try_from(flavor).map_err(|e| anyhow!("invalid --flavor: {}", e))?,
+        target_triple,
+        python_version,
+    )?;
+
+    let cache_dir = env.python_distributions_dir();
+    let dist = resolve_distribution(&distribution_location, &cache_dir)
+        .context("resolving Python distribution")?;
+
+    let mut policy = dist.create_packaging_policy()?;
+    policy.set_extension_module_filter(ExtensionModuleFilter::All);
+
+    let (temp_dir, wheels) = pip_download_wheels(
+        env,
+        dist.as_ref(),
+        dist.as_ref(),
+        &policy,
+        verbose,
+        requirements,
+    )
+    .context("downloading Python packages with pip")?;
+
+    create_dir_all(dest_path)
+        .with_context(|| format!("creating destination directory {}", dest_path.display()))?;
+
+    let package_python_version = dist.python_major_minor_version();
+    let abi_tag = dist.python_abi_tag().unwrap_or_default();
+
+    for (name, path) in wheels {
+        let wheel = WheelArchive::from_path(&path)?;
+        let package_path = dest_path.join(&name);
+
+        // Installing is not additive: replace whatever was there so a package
+        // upgrade does not leave stale modules behind.
+        if package_path.exists() {
+            std::fs::remove_dir_all(&package_path)
+                .with_context(|| format!("removing {}", package_path.display()))?;
+        }
+
+        // The helpers return install-layout paths: root files and *.dist-info
+        // as-is, purelib/platlib/data with their wheel prefix stripped. Placing
+        // all of them under one directory yields a sys.path entry.
+        let mut files = wheel.regular_files();
+        files.extend(wheel.purelib_files());
+        files.extend(wheel.platlib_files());
+        files.extend(wheel.data_files());
+
+        for file in files {
+            let relative = file.path();
+            let target = package_path.join(relative);
+
+            if let Some(parent) = target.parent() {
+                create_dir_all(parent)
+                    .with_context(|| format!("creating {}", parent.display()))?;
+            }
+
+            let entry = file.entry();
+            std::fs::write(&target, entry.file_data().resolve_content()?)
+                .with_context(|| format!("writing {}", target.display()))?;
+
+            #[cfg(unix)]
+            if entry.is_executable() {
+                use std::os::unix::fs::PermissionsExt;
+                let mut permissions = std::fs::metadata(&target)?.permissions();
+                permissions.set_mode(0o755);
+                std::fs::set_permissions(&target, permissions)?;
+            }
+        }
+
+        // A packed file for the same package would shadow the directory.
+        for stale in [
+            dest_path.join(format!("{}.packed-resources", name)),
+            dest_path.join(format!("{}.packed-resources.json", name)),
+        ] {
+            if stale.exists() {
+                std::fs::remove_file(&stale)
+                    .with_context(|| format!("removing {}", stale.display()))?;
+                println!("removed {} (replaced by an unpacked directory)", stale.display());
+            }
+        }
+
+        let metadata_file = dest_path.join(format!("{}.json", name));
+        let metadata = serde_json::json!({
+            "kind": "unpacked",
+            "python_version": package_python_version,
+            "target_triple": target_triple,
+            "abi_tag": abi_tag,
+        });
+
+        std::fs::write(&metadata_file, serde_json::to_string_pretty(&metadata)?)
+            .with_context(|| format!("writing {}", metadata_file.display()))?;
+
+        println!("wrote {}/", package_path.display());
+    }
+
+    temp_dir
+        .close()
+        .context("closing temporary directory")?;
+
+    println!(
+        "unpacked libraries are imported from real files: add them next to a runner in pyoxy-modules/"
+    );
+
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

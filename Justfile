@@ -152,10 +152,34 @@ pyoxy-package python_version="3.11" *req:
   # positional argument; catch the easy mistake of omitting it.
   case "{{python_version}}" in
     [0-9]*.[0-9]*) ;;
-    *) echo "first argument must be the Python version, e.g. \`just pyoxy-package 3.11 requests\` (got '{{python_version}}')" >&2; exit 1 ;;
+    *) echo "first argument must be the Python version: just pyoxy-package 3.11 requests (got '{{python_version}}')" >&2; exit 1 ;;
   esac
 
   cargo run --release --quiet --bin pyoxidizer -- package \
+    --python-version {{python_version}} --dest dist/pyoxy-modules {{req}}
+
+# Produce one directory per Python package in dist/pyoxy-modules/, containing
+# the package's real files: modules, extension modules (`.so`/`.dll`),
+# package data and `.dist-info` metadata.
+#
+# This is the mode for packages that need native code or a real `__file__`.
+# A packed resources file is loaded from memory and cannot carry extension
+# modules on Linux, so `numpy`, `pandas`, `psutil` or `pyocd` only work
+# unpacked. Each directory is a `sys.path` entry next to the runner; removing
+# the directory removes the library, with no rebuild.
+#
+# The first argument is the Python version, like `pyoxy-package`; the wheel
+# ABI must match the runner (cp311 wheels for a 3.11 runner).
+pyoxy-package-dir python_version="3.11" *req:
+  #!/usr/bin/env bash
+  set -eo pipefail
+
+  case "{{python_version}}" in
+    [0-9]*.[0-9]*) ;;
+    *) echo "first argument must be the Python version: just pyoxy-package-dir 3.11 numpy (got '{{python_version}}')" >&2; exit 1 ;;
+  esac
+
+  cargo run --release --quiet --bin pyoxidizer -- package --unpack \
     --python-version {{python_version}} --dest dist/pyoxy-modules {{req}}
 
 # Run the test suites of the pyoxidizer build tool and the pyoxy runner.

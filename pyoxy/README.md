@@ -25,6 +25,7 @@ are listed per section for environments without `just` (e.g. CI uses them).
 | Self-contained runner            | `just pyoxy `[`libs`]    | `dist/pyoxy/pyoxy`             | static (embedded)         |
 | Split-resources runner           | `just pyoxy … split`     | `dist/pyoxy/pyoxy` + `pyoxy-resources.packed-resources` | static (blob beside the exe) |
 | Per-package library files        | `just pyoxy-package ...` | `dist/pyoxy-modules/*.packed-resources` | n/a (data files) |
+| Unpacked library directories     | `just pyoxy-package-dir ...` | `dist/pyoxy-modules/<pkg>/` (real files) | n/a (sys.path) |
 | Development runner               | `just pyoxy-dev ...`     | runs `target/debug/pyoxy`      | dynamic (system libpython)|
 | Standalone `python`              | `just python `[X.Y]      | `dist/python/python`           | static (embedded)         |
 
@@ -130,6 +131,24 @@ needs to know which Python the runner targets, so it applies to builds linked
 against a distribution; `just pyoxy-dev` links the host's libpython and loads
 files unconditionally.
 
+**Unpacked directories (`just pyoxy-package-dir`)** — the way for packages
+with native code. Each wheel is written to its own directory of real files
+(modules, `.so`, data, `.dist-info`), which the runner adds to `sys.path`:
+
+```console
+$ just pyoxy-package-dir 3.11 numpy
+wrote dist/pyoxy-modules/numpy/
+$ ./dist/pyoxy/pyoxy -c 'import numpy; print(numpy.__version__, numpy.__file__)'
+2.2.6 /srv/pyoxy/pyoxy-modules/numpy/numpy/__init__.py
+```
+
+`numpy` (59 MB), `pandas` (44 MB), `psutil`, `capstone`, `pyocd` and anything
+else with extension modules only work this way: a packed file cannot carry a
+shared library on Linux. `__file__` is real here too, which packed resources
+cannot provide. Adding or removing a directory works like the packed files -
+no rebuild - and a directory takes precedence over a `*.packed-resources` file
+with the same package name (with a warning).
+
 **Baked into the executable (`just pyoxy` libraries argument)** — the
 single-file way. A space separated list of requirements is baked at build
 time:
@@ -162,8 +181,9 @@ Two independent limits are worth knowing before choosing a package:
   from memory is only implemented for Windows, and on Linux the importer
   refuses it outright. `numpy` and `pandas` are therefore out of reach for
   any packed-resources mode, however the files are grouped — they need their
-  `*.so` files to exist on disk. Run the packaging command anyway to see the
-  exact count (`numpy` loses 20, `pandas` 44 on 3.11). Pure Python packages
+  `*.so` files to exist on disk. Use `just pyoxy-package-dir` for those;
+  running the packed command anyway tells you the exact count (`numpy` loses
+  20, `pandas` 44 on 3.11). Pure Python packages
 (`requests`, `click`, `attrs`, `pyyaml`, ...) are the sweet spot; a package
 whose optional C accelerator is skipped still imports and works, just
 without the accelerated path (e.g. `charset_normalizer` behind `requests`).

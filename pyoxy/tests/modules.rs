@@ -3,8 +3,9 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 //! Tests of the `pyoxy-modules` loader: every `*.packed-resources` file
-//! next to the executable is registered as a resource source, so copying a
-//! file in makes a library importable and deleting it removes the library.
+//! next to the executable is registered as a resource source and every
+//! subdirectory becomes a `sys.path` entry, so copying either in makes a
+//! library importable and deleting it removes the library.
 
 use {
     anyhow::{Context, Result},
@@ -68,6 +69,31 @@ fn run() -> Result<()> {
     Command::new(&test_exe)
         .arg("-c")
         .arg("import pyoxy_loader_test_module")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("ModuleNotFoundError"));
+
+    // A directory in the same place is imported through sys.path, which is
+    // what unpacked packages (`pyoxidizer package --unpack`) rely on: the
+    // module keeps a real __file__, something in-memory resources lack.
+    let unpacked_pkg = modules_dir.join("unpacked_pkg");
+    std::fs::create_dir(&unpacked_pkg)?;
+    std::fs::write(unpacked_pkg.join("unpacked_mod.py"), "VALUE = 'from a real file'\n")?;
+
+    Command::new(&test_exe)
+        .arg("-c")
+        .arg("import unpacked_mod; print(unpacked_mod.VALUE); print(unpacked_mod.__file__ is not None)")
+        .assert()
+        .success()
+        .stdout(predicate::function(|out: &str| {
+            out.contains("from a real file\nTrue\n")
+        }));
+
+    std::fs::remove_dir_all(&unpacked_pkg)?;
+
+    Command::new(&test_exe)
+        .arg("-c")
+        .arg("import unpacked_mod")
         .assert()
         .failure()
         .stderr(predicate::str::contains("ModuleNotFoundError"));

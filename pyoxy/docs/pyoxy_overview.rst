@@ -77,6 +77,22 @@ the Python version and target triple it was built for. A ``pyoxy`` built for a
 different Python skips the mismatch with a warning on stderr rather than failing
 on incompatible bytecode; files without a sidecar are loaded as before.
 
+Unpacked Directories
+--------------------
+
+Every subdirectory of the ``pyoxy-modules`` directory is added to ``sys.path``,
+so a package installed there as real files is imported by CPython's normal
+finder: extension modules load from disk and ``__file__`` is a real path. The
+directories are produced by ``pyoxidizer package --unpack`` (in this
+repository, ``just pyoxy-package-dir``)::
+
+   $ pyoxidizer package --unpack --dest pyoxy-modules --python-version 3.11 numpy
+
+This is the mode for packages with C extension modules, which cannot be loaded
+from packed resources on Linux, and for packages that read ``__file__`` at
+import time. A directory takes precedence over a ``*.packed-resources`` file
+of the same package name.
+
 Baking Libraries Into the Executable
 ------------------------------------
 

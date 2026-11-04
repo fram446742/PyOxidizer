@@ -99,8 +99,10 @@ resources. Use --verbose for the individual skipped modules.
 
 Extension modules cannot be loaded from a packed resources file on Linux
 (in-memory shared library loading is Windows-only), so packages that need
-their .so - numpy, pandas, psutil - remain unusable this way no matter how
-the files are split.
+their .so - numpy, pandas, psutil - are unusable in that form. Use --unpack
+for those: each wheel is written to its own directory of real files instead
+of a packed file, and the runner imports from there, which also gives
+modules a real __file__.
 
 Each file is accompanied by a `<name>.packed-resources.json` recording the
 Python version and target triple it was built for. A pyoxy executable skips
@@ -609,6 +611,14 @@ fn cmd_package() -> Command {
                     .value_name("DIR")
                     .default_value(".")
                     .help("Directory to write the packed resources files to"),
+            )
+            .arg(
+                Arg::new("unpack")
+                    .long("unpack")
+                    .action(ArgAction::SetTrue)
+                    .help(
+                        "Write each package as a directory of real files instead of a packed resources file",
+                    ),
             )
             .arg(
                 Arg::new("requirements")
@@ -1333,15 +1343,27 @@ pub fn run_cli() -> Result<()> {
                 .cloned()
                 .collect::<Vec<_>>();
 
-            projectmgmt::python_package_generate_packed_resources(
-                &env,
-                dest_path,
-                &requirements,
-                target_triple,
-                flavor,
-                python_version.map(|x| x.as_str()),
-                verbose,
-            )
+            if args.get_flag("unpack") {
+                projectmgmt::python_package_unpack_wheels(
+                    &env,
+                    dest_path,
+                    &requirements,
+                    target_triple,
+                    flavor,
+                    python_version.map(|x| x.as_str()),
+                    verbose,
+                )
+            } else {
+                projectmgmt::python_package_generate_packed_resources(
+                    &env,
+                    dest_path,
+                    &requirements,
+                    target_triple,
+                    flavor,
+                    python_version.map(|x| x.as_str()),
+                    verbose,
+                )
+            }
         }
 
         "rust-project-licensing" => {

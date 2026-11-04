@@ -9,7 +9,7 @@ use {
     std::{
         ffi::{OsStr, OsString},
         ops::{Deref, DerefMut},
-        path::Path,
+        path::{Path, PathBuf},
     },
 };
 
@@ -34,6 +34,9 @@ const STDLIB_RESOURCES_FILE: &str = "pyoxy-resources.packed-resources";
 const MODULES_DIR: &str = "pyoxy-modules";
 
 const MODULES_FILE_SUFFIX: &str = ".packed-resources";
+
+/// Separator used when joining `sys.path` entries into a PYTHONPATH value.
+const PATH_LIST_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 
 /// Python version (major.minor) this binary was built against, when known.
 ///
@@ -108,6 +111,22 @@ fn add_module_files<'a>(builder: &mut pyembed::OxidizedPythonInterpreterConfig<'
     }
 
     for path in paths {
+        // A directory of real files for the same package wins: it is the form
+        // that can carry extension modules. Loading both would make the packed
+        // copy shadow the usable one.
+        let stem = path
+            .file_name()
+            .map(|n| n.to_string_lossy().trim_end_matches(MODULES_FILE_SUFFIX).to_string())
+            .unwrap_or_default();
+
+        if !stem.is_empty() && dir.join(&stem).is_dir() {
+            eprintln!(
+                "pyoxy: using {}/ and ignoring {}{}",
+                stem, stem, MODULES_FILE_SUFFIX
+            );
+            continue;
+        }
+
         if !module_file_compatible(&path) {
             continue;
         }
@@ -120,6 +139,67 @@ fn add_module_files<'a>(builder: &mut pyembed::OxidizedPythonInterpreterConfig<'
     }
 
     builder.oxidized_importer = true;
+}
+
+/// Metadata written next to an unpacked package directory by
+/// `pyoxidizer package --unpack`.
+#[derive(Debug, Deserialize)]
+struct PackageMetadata {
+    python_version: Option<String>,
+}
+
+/// Subdirectories of `dir` that should become `sys.path` entries.
+///
+/// `pyoxidizer package --unpack` writes one directory per package with real
+/// files in it, which is what C extension modules and modules reading
+/// `__file__` require. Directories whose metadata names another Python are
+/// skipped with a warning, for the same reason packed files are.
+fn module_dirs(dir: &Path) -> Vec<PathBuf> {
+    let mut dirs: Vec<_> = match std::fs::read_dir(dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| path.is_dir())
+            .collect(),
+        // The directory does not have to exist.
+        Err(_) => return Vec::new(),
+    };
+
+    dirs.retain(|path| {
+        let Some(expected) = PYTHON_VERSION else {
+            return true;
+        };
+
+        let metadata_path = path.with_extension("json");
+        let Ok(raw) = std::fs::read_to_string(&metadata_path) else {
+            return true;
+        };
+
+        match serde_yaml::from_str::<PackageMetadata>(&raw) {
+            Ok(metadata) => match metadata.python_version {
+                Some(version) if version != expected => {
+                    eprintln!(
+                        "pyoxy: skipping {}: built for Python {}, this runner is Python {}",
+                        path.display(),
+                        version,
+                        expected
+                    );
+                    false
+                }
+                _ => true,
+            },
+            Err(e) => {
+                eprintln!(
+                    "pyoxy: ignoring unreadable {}: {}",
+                    metadata_path.display(),
+                    e
+                );
+                true
+            }
+        }
+    });
+
+    dirs.sort();
+    dirs
 }
 
 /// An embedded Python interpreter configuration.
@@ -211,7 +291,41 @@ impl<'a> Config<'a> {
         // applies to a dynamic libpython build: that is how libraries are
         // usually tried out during development.
         if let Some(exe_dir) = &exe_dir {
-            add_module_files(&mut self.inner, &exe_dir.join(MODULES_DIR));
+            let modules_dir = exe_dir.join(MODULES_DIR);
+
+            add_module_files(&mut self.inner, &modules_dir);
+
+            // Unpacked packages are plain directories imported through
+            // sys.path, which is how extension modules and real files work.
+            let dirs = module_dirs(&modules_dir);
+
+            if !dirs.is_empty() {
+                if self_contained {
+                    // Self-contained builds start with an empty search path.
+                    self.interpreter_config
+                        .module_search_paths
+                        .get_or_insert_with(Vec::new)
+                        .extend(dirs);
+                } else {
+                    // A dynamic build computes its own paths; PYTHONPATH is
+                    // appended to them, so this adds to the host's paths
+                    // instead of replacing them.
+                    let mut paths = dirs;
+                    if let Some(existing) = std::env::var_os("PYTHONPATH") {
+                        paths.extend(std::env::split_paths(&existing));
+                    }
+
+                    if let Ok(joined) = std::env::join_paths(paths) {
+                        if let Ok(joined) = joined.into_string() {
+                            self.interpreter_config.python_path_env =
+                                Some(match &self.interpreter_config.python_path_env {
+                                    Some(current) => format!("{}{}{}", joined, PATH_LIST_SEPARATOR, current),
+                                    None => joined,
+                                });
+                        }
+                    }
+                }
+            }
         }
 
         self.set_missing_path_configuration = false;
