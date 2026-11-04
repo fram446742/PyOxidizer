@@ -1,5 +1,11 @@
 set dotenv-load
 
+# Recipe arguments are available as positional arguments ($1, $2, ... "$@")
+# in shebang scripts. This lets recipes like `pyoxy-dev` take arbitrary
+# interpreter arguments without them being re-split by the shell through
+# {{args}} interpolation.
+set positional-arguments
+
 default:
   cargo build
 
@@ -63,9 +69,10 @@ python python_version="":
 #
 # libraries is an optional space separated list of Python packages to bake
 # into the single executable, e.g. `just pyoxy 3.10 "requests pyyaml"`.
-# To get one file per package (addable/removable next to the binary at any
-# time) use `just pyoxy-package` instead. Override the Rust target triple
-# with `just pyoxy <python-version> <libraries> <triple>`.
+# Instead of baking, `just pyoxy-package` produces one removable file per
+# package; files in dist/pyoxy-modules/ are automatically copied next to
+# the built binary, so both mechanisms compose. Override the Rust target
+# triple with `just pyoxy <python-version> <libraries> <triple>`.
 pyoxy python_version="3.10" libraries="" triple=default_triple:
   #!/usr/bin/env bash
   set -eo pipefail
@@ -77,8 +84,29 @@ pyoxy python_version="3.10" libraries="" triple=default_triple:
 
   cargo run --release --quiet --bin pyoxidizer -- pyoxy \
     --path pyoxy --dest dist/pyoxy "${args[@]}"
+
+  # Ship any per-package library files with the executable. Fresh copy so
+  # packages removed from dist/pyoxy-modules do not linger.
+  if [ -d dist/pyoxy-modules ]; then
+    rm -rf dist/pyoxy/pyoxy-modules
+    cp -r dist/pyoxy-modules dist/pyoxy/pyoxy-modules
+    ls -sh dist/pyoxy/pyoxy-modules/
+  fi
+
   ls -lh dist/pyoxy/
   ./dist/pyoxy/pyoxy -V
+
+# Build and run the development pyoxy: it links the system's libpython
+# dynamically and inherits its search paths, so it starts instantly (no
+# distribution download or static link) and is only for local iteration,
+# not for distribution. Interpreter arguments are passed through verbatim:
+# `just pyoxy-dev -c 'print(sys.version)'`, `just pyoxy-dev script.py`,
+# `just pyoxy-dev -m mymodule`.
+pyoxy-dev *args:
+  #!/usr/bin/env bash
+  set -eo pipefail
+
+  exec cargo run --quiet -p pyoxy -- "$@"
 
 # Produce one `*.packed-resources` file per Python package into
 # dist/pyoxy-modules/, ready to copy next to a pyoxy executable under a
@@ -97,6 +125,10 @@ pyoxy-package *req:
 
   cargo run --release --quiet --bin pyoxidizer -- package \
     --dest dist/pyoxy-modules {{req}}
+
+# Run the test suites of the pyoxidizer build tool and the pyoxy runner.
+test:
+  cargo test --quiet -p pyoxidizer -p pyoxy
 
 # Name of the repository section in ~/.pypirc that PyOxidizer wheels are
 # uploaded to. This fork is not published on pypi.org.

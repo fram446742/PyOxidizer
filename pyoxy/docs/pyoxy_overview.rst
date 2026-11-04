@@ -51,7 +51,7 @@ like built-in modules. Files are memory-mapped, so a large library set costs no
 readiness memory and files can be swapped while copying.
 
 The files are produced one per Python package by the ``pyoxidizer package``
-command::
+command (or, in this repository, ``just pyoxy-package``)::
 
    $ pyoxidizer package --dest pyoxy-modules requests
    $ cp pyoxy-modules/requests.packed-resources pyoxy-modules/
@@ -69,7 +69,8 @@ Baking Libraries Into the Executable
 ------------------------------------
 
 Libraries can instead be baked into the single executable at build time by the
-``pyoxidizer pyoxy`` command::
+``pyoxidizer pyoxy`` (or ``just pyoxy <python-version> "<libraries>"``)
+command::
 
    $ pyoxidizer pyoxy --path pyoxy --dest dist/pyoxy --var REQUIREMENTS "requests pyyaml"
 
@@ -78,8 +79,9 @@ and the named packages. The same in-memory constraint applies: C extension
 modules are skipped with a warning.
 
 The two mechanisms compose: a baked binary still picks up ``pyoxy-modules/``
-files, which is a convenient way to iterate on additional libraries without
-rebuilding the (large) executable.
+files (``just pyoxy`` copies ``dist/pyoxy-modules`` next to the binary on
+every build), which is a convenient way to iterate on additional libraries
+without rebuilding the (large) executable.
 
 Additional Python Features
 ==========================
