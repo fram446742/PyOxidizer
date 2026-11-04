@@ -53,7 +53,7 @@ readiness memory and files can be swapped while copying.
 The files are produced one per Python package by the ``pyoxidizer package``
 command (or, in this repository, ``just pyoxy-package``)::
 
-   $ pyoxidizer package --dest pyoxy-modules requests
+   $ pyoxidizer package --dest pyoxy-modules --python-version 3.11 requests
    $ cp pyoxy-modules/requests.packed-resources pyoxy-modules/
 
 Packages resolved this way include every transitive dependency, each in its own
@@ -62,8 +62,14 @@ it, and no rebuild is required either way. Files without the
 ``.packed-resources`` suffix in that directory are ignored.
 
 Since the resources are loaded from memory, resources that cannot be loaded
-that way - C extension modules and untyped files - are skipped with a warning:
-pure Python packages are the sweet spot for this mechanism.
+that way - C extension modules and untyped files - are skipped with a warning,
+and the total skipped is summarized at the end: pure Python packages are the
+sweet spot for this mechanism.
+
+Each file is accompanied by a ``<name>.packed-resources.json`` sidecar recording
+the Python version and target triple it was built for. A ``pyoxy`` built for a
+different Python skips the mismatch with a warning on stderr rather than failing
+on incompatible bytecode; files without a sidecar are loaded as before.
 
 Baking Libraries Into the Executable
 ------------------------------------
@@ -77,6 +83,12 @@ command::
 This produces a single file containing the interpreter, the standard library
 and the named packages. The same in-memory constraint applies: C extension
 modules are skipped with a warning.
+
+Passing ``--split-resources`` to ``pyoxidizer pyoxy`` writes the resources to a
+``pyoxy-resources.packed-resources`` file next to the executable instead, which
+the runner memory-maps: the executable shrinks from ~150 MB to ~23 MB at the
+cost of shipping both files together. Neither mode needs a Python installation
+on the host.
 
 The two mechanisms compose: a baked binary still picks up ``pyoxy-modules/``
 files (``just pyoxy`` copies ``dist/pyoxy-modules`` next to the binary on

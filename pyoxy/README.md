@@ -23,6 +23,7 @@ are listed per section for environments without `just` (e.g. CI uses them).
 | Mode                             | Command                  | Output                         | Python linkage            |
 |----------------------------------|--------------------------|--------------------------------|---------------------------|
 | Self-contained runner            | `just pyoxy `[`libs`]    | `dist/pyoxy/pyoxy`             | static (embedded)         |
+| Split-resources runner           | `just pyoxy … split`     | `dist/pyoxy/pyoxy` + `pyoxy-resources.packed-resources` | static (blob beside the exe) |
 | Per-package library files        | `just pyoxy-package ...` | `dist/pyoxy-modules/*.packed-resources` | n/a (data files) |
 | Development runner               | `just pyoxy-dev ...`     | runs `target/debug/pyoxy`      | dynamic (system libpython)|
 | Standalone `python`              | `just python `[X.Y]      | `dist/python/python`           | static (embedded)         |
@@ -38,12 +39,13 @@ and starts with an empty `sys.path` (hermetic — it imports only what it
 carries).
 
 ```console
-$ just pyoxy                        # release binary into dist/pyoxy/
+$ just pyoxy                        # release binary into dist/pyoxy/ (3.11)
 $ just pyoxy 3.12                   # choose the Python version
-$ just pyoxy 3.10 "requests"        # additionally bake libraries into it
-$ just pyoxy 3.10 "requests" x86_64-unknown-linux-gnu z   # + size-leaning Rust profile
+$ just pyoxy 3.11 "requests"        # additionally bake libraries into it
+$ just pyoxy 3.11 "requests" x86_64-unknown-linux-gnu z   # + size-leaning Rust profile
+$ just pyoxy 3.11 "" "" "" split    # small binary, resources in a sibling file
 ${DIST}/pyoxy -V
-Python 3.10.22
+Python 3.11.17
 ```
 
 Size is dominated by what you embed, not by the Rust code: CPython 3.11.17
@@ -63,6 +65,35 @@ $ cargo run --release --quiet --bin pyoxidizer -- \
 > you. If you edit that `.bzl` file, delete `pyoxy/build/` first — the
 > Starlark target cache does not detect `.bzl` edits.
 
+#### Split resources (small binary)
+
+Embedding the standard library is what makes the executable portable, and
+also what makes it ~150 MB. `--split-resources` moves the same blob to a
+file next to the executable, which the runner memory-maps:
+
+```console
+$ just pyoxy 3.11 "requests" x86_64-unknown-linux-gnu 3 split
+wrote dist/pyoxy/pyoxy
+wrote dist/pyoxy/pyoxy-resources.packed-resources (sidecar resources)
+$ ls -lh dist/pyoxy/
+pyoxy                             23M   # libpython is still linked in; the Rust code is ~3 MB
+pyoxy-resources.packed-resources 131M
+$ cd /tmp && /path/to/dist/pyoxy/pyoxy -c 'import requests'   # works from anywhere
+```
+
+Raw form:
+
+```console
+$ cargo run ... -- pyoxy --split-resources --path pyoxy --dest dist/pyoxy \
+    [--var PYTHON_VERSION X.Y] [--var REQUIREMENTS "requests"]
+```
+
+The two files are a unit: moving the executable without the blob leaves it
+without a standard library, and it says so on stderr before CPython fails to
+initialize. Both modes still need no Python installation on the host — the
+difference is one file versus two. Everything else composes:
+`pyoxy-modules/`, `--yaml` and the per-package files work identically.
+
 ### Shipping Python libraries
 
 Third-party packages can become importable to pyoxy in two ways, and both
@@ -70,11 +101,13 @@ can be combined.
 
 **One file per package (`just pyoxy-package`)** — the flexible way. pip
 resolves each requirement (including transitive dependencies) and every
-package is written to its own removable file:
+package is written to its own removable file. The first argument is the
+Python version, so files match the runner they are meant for:
 
 ```console
-$ just pyoxy-package requests lxml
+$ just pyoxy-package 3.11 requests lxml
 wrote dist/pyoxy-modules/requests.packed-resources
+wrote dist/pyoxy-modules/requests.packed-resources.json
 ...
 
 $ just pyoxy                        # builds and copies pyoxy-modules/ to
@@ -88,12 +121,21 @@ is needed either way. `just pyoxy` re-syncs the directory next to the binary
 on every build, and the same files can also be listed in a `--yaml`
 interpreter config via `packed_resources`.
 
+Each file has a `<name>.packed-resources.json` sidecar with the Python
+version and target triple it was built for. A runner built against another
+Python skips the mismatch with a warning on stderr — bytecode from a
+different interpreter would otherwise fail with an opaque import error.
+Files without the sidecar (older output) are loaded as before. The check
+needs to know which Python the runner targets, so it applies to builds linked
+against a distribution; `just pyoxy-dev` links the host's libpython and loads
+files unconditionally.
+
 **Baked into the executable (`just pyoxy` libraries argument)** — the
 single-file way. A space separated list of requirements is baked at build
 time:
 
 ```console
-$ just pyoxy 3.10 "requests pyyaml"
+$ just pyoxy 3.11 "requests pyyaml"
 $ cargo run ... -- pyoxy ... --var REQUIREMENTS "requests pyyaml"   # raw form
 ```
 
@@ -101,7 +143,9 @@ Result: one file containing interpreter, standard library and packages.
 
 **Constraint of both ways:** resources are loaded from memory, so anything
 that cannot load that way — C extension modules and untyped files — is
-skipped with a warning at generation time. Pure Python packages
+skipped with a warning at generation time, and the number skipped is
+summarized at the end of the command (a package whose C accelerator was
+dropped still imports, so its absence is otherwise easy to miss). Pure Python packages
 (`requests`, `click`, `attrs`, `pyyaml`, ...) are the sweet spot; a package
 whose optional C accelerator is skipped still imports and works, just
 without the accelerated path (e.g. `charset_normalizer` behind `requests`).
@@ -167,7 +211,7 @@ argument, which exports `CARGO_PROFILE_RELEASE_OPT_LEVEL` (the variable
 `pyoxidizer pyoxy` passes through to cargo):
 
 ```console
-$ just pyoxy 3.10 "" x86_64-unknown-linux-gnu z    # 3 (default), 2, 1, s, z
+$ just pyoxy 3.11 "" x86_64-unknown-linux-gnu z    # 3 (default), 2, 1, s, z
 $ CARGO_PROFILE_RELEASE_OPT_LEVEL=z cargo build --release -p pyoxy   # raw form
 ```
 
@@ -217,8 +261,9 @@ $ just test
 ```
 
 runs the test suites of the `pyoxidizer` build tool (including pip wheels
-and CLI snapshots) and of the pyoxy runner (interpreter, YAML and the
-`pyoxy-modules` loader cases).
+and CLI snapshots) and of the pyoxy runner (interpreter, YAML, the
+`pyoxy-modules` loader cases, and `trycmd` snapshots of the runner's own
+argument surface: `--runner-help` and the malformed-`--yaml` errors).
 
 ## PyOxy is part of PyOxidizer
 
