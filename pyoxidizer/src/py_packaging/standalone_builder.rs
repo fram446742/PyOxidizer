@@ -919,11 +919,16 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
 
         if num_modules > 0 {
             with_shell(|log| -> Result<()> {
+                // Embedded modules have no path, so code reading __file__ sees
+                // a NameError at run time. Name the consequence and the way
+                // out instead of leaving a bare count.
                 if num_modules == 1 {
-                    log.warn("__file__ was encountered in 1 embedded module")?;
+                    log.warn(
+                        "1 embedded module reads __file__, which embedded resources do not provide: it fails if that code path runs. Ship the package unpacked (`pyoxidizer package --unpack`) when it matters.",
+                    )?;
                 } else {
                     log.warn(format!(
-                        "__file__ was encountered in {} embedded modules",
+                        "{} embedded modules read __file__, which embedded resources do not provide: they fail if those code paths run. Ship the packages unpacked (`pyoxidizer package --unpack`) when it matters.",
                         num_modules
                     ))?;
                 }

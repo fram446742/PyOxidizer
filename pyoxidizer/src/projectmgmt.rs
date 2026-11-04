@@ -705,8 +705,23 @@ pub fn python_package_generate_packed_resources(
             );
         }
 
+        // A packed resources file cannot carry these on this platform, so the
+        // only fix is the other mode. Print the exact commands instead of a
+        // generic hint: the caller already has every value they need.
+        let requirements = requirements.join(" ");
+        println!();
         println!(
-            "A package that needs a skipped module fails at import; check with: pyoxy -c 'import <package>'"
+            "C extension modules cannot be loaded from a packed resources file on this platform, so these packages will fail at import. Ship them as real files instead:"
+        );
+        println!(
+            "  pyoxidizer package --unpack --python-version {} --dest {} {}",
+            python_version,
+            dest_path.display(),
+            requirements
+        );
+        println!(
+            "  just pyoxy-package-dir {} {}   (this repository)",
+            python_version, requirements
         );
     }
 

@@ -128,6 +128,23 @@ wheels: `numpy` 59 MB, `pandas` 44 MB, `pyocd` 20 MB.
   it starts instantly, but inherits the host's `sys.path` and is only for
   iterating on the runner, never for distribution.
 
+### Reading the output
+
+Every command ends with a verdict; nothing important is left implicit.
+
+| Output | Meaning | What to do |
+|---|---|---|
+| `ok: dist/pyoxy/pyoxy - embedded (single file), baked libraries: …; N modular librar(y/ies) beside it` | the runner was built | nothing |
+| `packaging complete: N package(s), nothing was skipped` | every packed file is whole | nothing |
+| `packaging incomplete: N of M package(s) are missing resources` followed by the two commands to run | some packages lost C extension modules; a packed file cannot carry them here | run the printed `--unpack` command |
+| `incomplete: N C extension module(s) skipped` (per package) | that file is partial | use the unpacked mode for it |
+| `pyoxy: skipping <file>: built for Python 3.10, this runner is Python 3.11` | the library and the runner target different interpreters | rebuild with the runner's version |
+| `pyoxy: using <pkg>/ and ignoring <pkg>.packed-resources` | both forms are present; the directory wins | delete the stale packed file |
+| `warning: not shipping extension module _tkinter …` | that module needs Tcl/Tk shared libraries this static distribution cannot link | expected; `tkinter` is unavailable in built binaries |
+| `warning: license text for … is missing from the Python distribution archive` | the upstream archive lacks that file | licensing output only; the build is unaffected |
+| `warning: N embedded modules read __file__ …` | in-memory resources have no path | ship those packages unpacked when they need `__file__` |
+| `pyoxy: <blob> not found next to the executable` | a split build lost its payload file | keep `pyoxy` and `pyoxy-resources.packed-resources` together |
+
 ### Constraints worth knowing
 
 * Wheel ABI is pinned: `cp311` wheels need a 3.11 runner, and `manylinux`

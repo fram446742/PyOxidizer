@@ -1019,7 +1019,7 @@ impl StandaloneDistribution {
                 if !bundled_libraries.is_empty() {
                     with_shell(|log| {
                         log.warn(format!(
-                            "ignoring extension module {} (variant {}) because it depends on shared libraries bundled with the Python distribution that cannot be linked statically: {}",
+                            "not shipping extension module {} (variant {}): it needs shared libraries this distribution bundles but cannot link statically ({}). This is expected; code importing it fails at run time.",
                             module,
                             entry.variant,
                             bundled_libraries.join(", ")
@@ -1088,7 +1088,11 @@ impl StandaloneDistribution {
                             license.add_license_text(text);
                         } else {
                             with_shell(|log| {
-                                log.warn(format!("failed to read {} from Python distribution", path)).unwrap_or_default();
+                                log.warn(format!(
+                                    "license text for {} is missing from the Python distribution archive; licensing output omits it (the build is not affected)",
+                                    path
+                                ))
+                                .unwrap_or_default();
                             });
                         }
                     }

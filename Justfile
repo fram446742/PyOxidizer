@@ -118,6 +118,19 @@ pyoxy python_version="3.11" libraries="" triple=default_triple opt="3" split="":
   ls -lh dist/pyoxy/
   ./dist/pyoxy/pyoxy -V
 
+  if [ -n "{{libraries}}" ]; then
+    baked="baked libraries: {{libraries}}"
+  else
+    baked="standard library only"
+  fi
+  if [ -n "{{split}}" ]; then
+    mode="split (payload in pyoxy-resources.packed-resources, keep both files together)"
+  else
+    mode="embedded (single file)"
+  fi
+  modular=$(ls -d dist/pyoxy/pyoxy-modules/*/ dist/pyoxy/pyoxy-modules/*.packed-resources 2>/dev/null | wc -l)
+  echo "ok: dist/pyoxy/pyoxy - $mode, $baked; $modular modular librar(y|ies) beside it"
+
 # Build and run the development pyoxy: it links the system's libpython
 # dynamically and inherits its search paths, so it starts instantly (no
 # distribution download or static link) and is only for local iteration,
@@ -153,6 +166,14 @@ pyoxy-package python_version="3.11" *req:
   case "{{python_version}}" in
     [0-9]*.[0-9]*) ;;
     *) echo "first argument must be the Python version: just pyoxy-package 3.11 requests (got '{{python_version}}')" >&2; exit 1 ;;
+  esac
+
+  case "{{req}}" in
+    *--unpack*)
+      echo "--unpack is a mode, not a requirement: use the unpacked recipe instead" >&2
+      echo "  just pyoxy-package-dir {{python_version}} <requirements>" >&2
+      exit 1
+      ;;
   esac
 
   cargo run --release --quiet --bin pyoxidizer -- package \
