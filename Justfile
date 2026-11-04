@@ -72,10 +72,21 @@ python python_version="":
 # Instead of baking, `just pyoxy-package` produces one removable file per
 # package; files in dist/pyoxy-modules/ are automatically copied next to
 # the built binary, so both mechanisms compose. Override the Rust target
-# triple with `just pyoxy <python-version> <libraries> <triple>`.
-pyoxy python_version="3.10" libraries="" triple=default_triple:
+# triple with `just pyoxy <python-version> <libraries> <triple>`, and the
+# Rust optimization level with the fourth argument: 3 (default), 2, 1, s or
+# z. `z` shrinks the Rust part by ~1 MB out of a ~150 MB binary; the embedded
+# Python distribution and resources are unaffected by it.
+pyoxy python_version="3.10" libraries="" triple=default_triple opt="3":
   #!/usr/bin/env bash
   set -eo pipefail
+
+  case "{{opt}}" in
+    3|2|1|s|z) ;;
+    *) echo "opt-level must be one of 3, 2, 1, s, z (got '{{opt}}')" >&2; exit 1 ;;
+  esac
+  # cargo reads this at build time; `pyoxidizer pyoxy` passes its whole
+  # environment through to the cargo invocation it runs.
+  export CARGO_PROFILE_RELEASE_OPT_LEVEL="{{opt}}"
 
   args=(--release --target-triple {{triple}} --var PYTHON_VERSION {{python_version}})
   if [ -n "{{libraries}}" ]; then

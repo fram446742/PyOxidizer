@@ -23,6 +23,20 @@ members = [
 ]
 resolver = "2"
 
+# Release binaries built by this repository (pyoxy, pyoxidizer, the standalone
+# python distribution) are dominated by the embedded Python payload; the Rust
+# code itself is a few MB. These settings buy a smaller, slightly faster Rust
+# part for build time, and apply to every workspace member because cargo only
+# reads profiles from the workspace root manifest.
+#
+# Override the optimization level per invocation with the CARGO_PROFILE_RELEASE_OPT_LEVEL
+# environment variable, e.g. `just pyoxy 3.10 "" x86_64-unknown-linux-gnu z`.
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
 [workspace.metadata.release]
 allow-branch = ["main"]
 # This fork is not published to crates.io.

@@ -27,6 +27,9 @@ are listed per section for environments without `just` (e.g. CI uses them).
 | Development runner               | `just pyoxy-dev ...`     | runs `target/debug/pyoxy`      | dynamic (system libpython)|
 | Standalone `python`              | `just python `[X.Y]      | `dist/python/python`           | static (embedded)         |
 
+Rust optimization settings for these builds are described in
+[Optimizations](#optimizations).
+
 ### Static, self-contained runner (`just pyoxy`)
 
 The shipped mode: a single-file executable that statically links a Python
@@ -35,11 +38,18 @@ and starts with an empty `sys.path` (hermetic — it imports only what it
 carries).
 
 ```console
-$ just pyoxy                        # 115 MB release binary into dist/pyoxy/
+$ just pyoxy                        # release binary into dist/pyoxy/
 $ just pyoxy 3.12                   # choose the Python version
+$ just pyoxy 3.10 "requests"        # additionally bake libraries into it
+$ just pyoxy 3.10 "requests" x86_64-unknown-linux-gnu z   # + size-leaning Rust profile
 ${DIST}/pyoxy -V
 Python 3.10.22
 ```
+
+Size is dominated by what you embed, not by the Rust code: CPython 3.11.17
+with `requests` baked is 153 MB, of which the packed resources blob is
+131 MB and the linked `libpython3.a` another 43 MB on disk. See
+[Optimizations](#optimizations).
 
 Under the hood (what `just` runs):
 
@@ -131,6 +141,74 @@ $ just python                       # -> dist/python/python
 $ just python 3.14
 $ cargo run ... -- python --dest dist/python [--python-version X.Y]
 ```
+
+## Optimizations
+
+Two independent axes: the Rust code, and the embedded Python payload. Only
+the first is controlled by cargo; the second is what actually determines the
+binary size.
+
+### Rust code (cargo profiles)
+
+Profiles live in the **workspace root** `Cargo.toml`. Cargo ignores
+`[profile.*]` in a member manifest, which is why `pyoxy/Cargo.toml` has none
+and why `pyoxidizer pyoxy` (which runs `cargo build --release --target-dir
+pyoxy/target`) picks these up. Release builds use:
+
+| Setting         | Value          | Rationale                                      |
+|-----------------|----------------|------------------------------------------------|
+| `opt-level`     | `3`            | runtime performance                            |
+| `lto`           | `"thin"`       | cross-crate inlining for a few seconds of build |
+| `codegen-units` | `1`            | best codegen, at the cost of build parallelism  |
+| `strip`         | `"symbols"`    | −0.8 MB; release builds carry no debug info     |
+
+Override the optimization level per build with the fourth `just pyoxy`
+argument, which exports `CARGO_PROFILE_RELEASE_OPT_LEVEL` (the variable
+`pyoxidizer pyoxy` passes through to cargo):
+
+```console
+$ just pyoxy 3.10 "" x86_64-unknown-linux-gnu z    # 3 (default), 2, 1, s, z
+$ CARGO_PROFILE_RELEASE_OPT_LEVEL=z cargo build --release -p pyoxy   # raw form
+```
+
+Measured on a Rust-only dynamic build (`cargo build -p pyoxy --release`,
+78 crates, no embedded payload), so the effect is isolated:
+
+| Profile                                        | Size      | Δ         |
+|------------------------------------------------|-----------|-----------|
+| cargo default (`lto = false`, `codegen-units = 16`) | 3.04 MiB | —        |
+| committed (`lto = "thin"`, `codegen-units = 1`, `strip`) | 2.51 MiB | −17% |
+| `lto = "fat"` instead of thin                  | 2.12 MiB  | −30%      |
+| `opt-level = "z"` + fat LTO + `panic = "abort"`| 1.66 MiB  | −46%      |
+
+Startup is unchanged within noise (100 × `pyoxy -c 'pass'`: 571 ms / 570 ms
+/ 573 ms for the first, second and last rows; CPython initialization
+dominates at ~5.7 ms per invocation).
+
+On the shipped binary all of this is small: CPython 3.11.17 with `requests`
+baked went from 155.7 MB to 153.0 MB (−1.7%), essentially all of it `strip`,
+because the Rust part is ~2% of the file. `opt-level = "z"` buys another
+~0.5 MB; `panic = "abort"` is **not** enabled because it needs validation
+against code relying on unwinding.
+
+`just pyoxy-dev` and `just test` build with the dev profile and are not
+affected by `[profile.release]`; the pre-existing
+`[profile.dev.package."*"] opt-level = 3` in `.cargo/config.toml` only makes
+dependencies faster during tests.
+
+### Python payload (what actually grows)
+
+- `pyoxy/pyoxidizer.bzl` enables `policy.bytecode_optimize_level_zero`,
+  `..._one` and `..._two`, i.e. bytecode for `-O` and `-OO` as well. That
+  triples stdlib bytecode inside the packed resources blob. Dropping the
+  `-O`/`-OO` variants shrinks it a lot but breaks running the binary with
+  those flags (startup imports fail on the missing optimization level).
+- Libraries baked via `--var REQUIREMENTS` land in the same blob; the
+  sidecar `pyoxy-modules/*.packed-resources` mode keeps them out of the
+  binary entirely and is the size-friendly choice.
+- libpython comes from python-build-standalone's `pgo+lto-full` flavor, so
+  CPython itself is already PGO+LTO optimized upstream. No cargo setting
+  applies to it.
 
 ## Tests
 
