@@ -747,3 +747,10 @@ _python_scripts_venv:
     python3 -m venv venv
     venv/bin/pip install -r scripts/requirements.txt
   fi
+
+# Bring the fork up to date with the base fork. `main` carries no logic of its
+# own (see the port/* tags); when it does, this fails instead of merging
+# silently. The new code lives in the clean project, not here.
+sync:
+  git fetch origin --prune
+  git merge --ff-only origin/main
