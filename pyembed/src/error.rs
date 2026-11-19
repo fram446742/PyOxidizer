@@ -39,6 +39,12 @@ fn format_pyerr(py: Python, err: PyErr) -> Result<String, &'static str> {
 pub enum NewInterpreterError {
     Simple(&'static str),
     Dynamic(String),
+    /// CPython requested a clean process exit rather than reporting a failure.
+    ///
+    /// This happens when command line handling - such as `--help` or
+    /// `--version` - terminates the program. The `PyStatus` involved carries no
+    /// error message and the process should exit with the contained code.
+    Exit(i32),
 }
 
 impl From<&'static str> for NewInterpreterError {
@@ -52,6 +58,8 @@ impl Display for NewInterpreterError {
         match &self {
             NewInterpreterError::Simple(value) => value.fmt(f),
             NewInterpreterError::Dynamic(value) => value.fmt(f),
+            // Not an error condition: the interpreter asked us to exit.
+            NewInterpreterError::Exit(_) => Ok(()),
         }
     }
 }
@@ -59,6 +67,19 @@ impl Display for NewInterpreterError {
 impl std::error::Error for NewInterpreterError {}
 
 impl NewInterpreterError {
+    /// Process exit code requested by the interpreter, if it asked to exit.
+    ///
+    /// Applications embedding Python should typically flush their standard
+    /// streams then call `std::process::exit()` with this value instead of
+    /// reporting an error. This is how CPython implements `--help` and
+    /// `--version`.
+    pub fn exit_code(&self) -> Option<i32> {
+        match self {
+            NewInterpreterError::Exit(code) => Some(*code),
+            _ => None,
+        }
+    }
+
     pub fn new_from_pyerr(py: Python, err: PyErr, context: &str) -> Self {
         match format_pyerr(py, err) {
             Ok(value) => NewInterpreterError::Dynamic(format!("during {}: {}", context, value)),
@@ -67,6 +88,13 @@ impl NewInterpreterError {
     }
 
     pub fn new_from_pystatus(status: &pyffi::PyStatus, context: &str) -> Self {
+        // CPython uses the same type to signal both failures and deliberate
+        // exits - e.g. `python --help`. Exits carry no error message, so check
+        // for them first or they'd be misreported as failures.
+        if unsafe { pyffi::PyStatus_IsExit(*status) } != 0 {
+            return NewInterpreterError::Exit(status.exitcode as i32);
+        }
+
         if !status.func.is_null() && !status.err_msg.is_null() {
             let func = unsafe { CStr::from_ptr(status.func) };
             let msg = unsafe { CStr::from_ptr(status.err_msg) };
