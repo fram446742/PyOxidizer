@@ -155,6 +155,14 @@ Python modules imported from memory do not have the ``__file__`` attribute
 set. This can cause compatibility issues if Python code is relying on the
 existence of this module. See :ref:`no_file` for more.
 
+When building, PyOxidizer warns about embedded modules whose code reads
+``__file__``. Mentions in comments and string literals do not count.
+Standard library modules are only counted in a note, since
+nothing can be done about them. If you have checked that a package works
+without ``__file__``, add it to
+:py:attr:`PythonPackagingPolicy.dunder_file_allowed_packages` to turn the
+warning for its modules into a note as well.
+
 Filesystem-Relative
 -------------------
 
@@ -319,6 +327,14 @@ Functions registered as resource callbacks are called after the
 is otherwise made available to other Starlark code. This means that
 these callbacks provide a hook point where resources can be modified as
 soon as they are created.
+
+Callbacks receive every type of resource. This includes :py:class:`File`
+resources for the files in ``<name>.libs`` directories of wheels, even if
+:py:attr:`PythonPackagingPolicy.allow_files` is ``False``. Every resource
+has a ``name`` attribute and the ``add_*`` attributes. For a
+:py:class:`File`, ``name`` is its path. Other attributes, such as
+``package``, ``source`` or ``is_stdlib``, exist only on some resource types.
+Check ``type(resource)`` or use ``hasattr()`` before reading them.
 
 ``register_resource_callback()`` can be called multiple times to register
 multiple callbacks. Registered functions will be called in order of

@@ -19,9 +19,10 @@ use {
         module_util::{packages_from_module_name, resolve_path_for_module},
         python_source::has_dunder_file,
         resource::{
-            BytecodeOptimizationLevel, PythonExtensionModule, PythonModuleBytecode,
-            PythonModuleBytecodeFromSource, PythonModuleSource, PythonPackageDistributionResource,
-            PythonPackageResource, PythonResource, SharedLibrary,
+            is_in_bundled_libraries_directory, BytecodeOptimizationLevel, PythonExtensionModule,
+            PythonModuleBytecode, PythonModuleBytecodeFromSource, PythonModuleSource,
+            PythonPackageDistributionResource, PythonPackageResource, PythonResource,
+            SharedLibrary,
         },
     },
     anyhow::{anyhow, Context, Result},
@@ -89,6 +90,8 @@ pub struct PrePackagedResource {
     pub file_executable: bool,
     pub file_data_embedded: Option<FileData>,
     pub file_data_utf8_relative_path: Option<(PathBuf, FileData)>,
+    /// Whether the Python module belongs to the Python standard library.
+    pub is_stdlib: bool,
 }
 
 impl PrePackagedResource {
@@ -439,8 +442,25 @@ pub fn populate_parent_packages(
         })
         .collect::<Vec<(String, PrePackagedResource)>>();
 
+    // Packages whose own code is stored on the filesystem. The importer
+    // prefers in-memory bytecode over code on the filesystem. Bytecode
+    // materialized in memory for these packages would replace their code
+    // with an empty module.
+    let packages_on_filesystem = original_resources
+        .iter()
+        .filter(|(_, r)| {
+            r.relative_path_module_source.is_some()
+                || r.relative_path_bytecode.is_some()
+                || r.relative_path_bytecode_opt1.is_some()
+                || r.relative_path_bytecode_opt2.is_some()
+        })
+        .map(|(name, _)| name.clone())
+        .collect::<BTreeSet<_>>();
+
     for (name, original) in original_resources {
         for package in packages_from_module_name(&name) {
+            let on_filesystem = packages_on_filesystem.contains(&package);
+
             let entry = resources
                 .entry(package.clone())
                 .or_insert_with(|| PrePackagedResource {
@@ -456,8 +476,12 @@ pub fn populate_parent_packages(
             // what. If the original resource has a variant of bytecode in a
             // location, we materialize that variant on parents. We take
             // the source from the parent resource, if present. Otherwise
-            // defaulting to empty.
-            if original.in_memory_bytecode.is_some() && entry.in_memory_bytecode.is_none() {
+            // defaulting to empty. Parents with code on the filesystem get
+            // no in-memory bytecode.
+            if !on_filesystem
+                && original.in_memory_bytecode.is_some()
+                && entry.in_memory_bytecode.is_none()
+            {
                 entry.in_memory_bytecode = Some(PythonModuleBytecodeProvider::FromSource(
                     if let Some(source) = &entry.in_memory_source {
                         source.clone()
@@ -466,7 +490,9 @@ pub fn populate_parent_packages(
                     },
                 ));
             }
-            if original.in_memory_bytecode_opt1.is_some() && entry.in_memory_bytecode_opt1.is_none()
+            if !on_filesystem
+                && original.in_memory_bytecode_opt1.is_some()
+                && entry.in_memory_bytecode_opt1.is_none()
             {
                 entry.in_memory_bytecode_opt1 = Some(PythonModuleBytecodeProvider::FromSource(
                     if let Some(source) = &entry.in_memory_source {
@@ -476,7 +502,9 @@ pub fn populate_parent_packages(
                     },
                 ));
             }
-            if original.in_memory_bytecode_opt2.is_some() && entry.in_memory_bytecode_opt2.is_none()
+            if !on_filesystem
+                && original.in_memory_bytecode_opt2.is_some()
+                && entry.in_memory_bytecode_opt2.is_none()
             {
                 entry.in_memory_bytecode_opt2 = Some(PythonModuleBytecodeProvider::FromSource(
                     if let Some(source) = &entry.in_memory_source {
@@ -542,8 +570,9 @@ pub fn populate_parent_packages(
                     .get_or_insert_with(|| (prefix.clone(), FileData::Memory(vec![])));
             }
 
-            // Ditto for in-memory source.
-            if original.in_memory_source.is_some() {
+            // Ditto for in-memory source, which also takes precedence over
+            // source on the filesystem.
+            if !on_filesystem && original.in_memory_source.is_some() {
                 entry
                     .in_memory_source
                     .get_or_insert(FileData::Memory(vec![]));
@@ -866,6 +895,7 @@ impl PythonResourceCollector {
 
         entry.is_module = true;
         entry.is_package = module.is_package;
+        entry.is_stdlib = module.is_stdlib;
 
         match location {
             ConcreteResourceLocation::InMemory => {
@@ -970,6 +1000,7 @@ impl PythonResourceCollector {
 
         entry.is_module = true;
         entry.is_package = module.is_package;
+        entry.is_stdlib = module.is_stdlib;
 
         // TODO having to resolve the FileData here is a bit unfortunate.
         // We could invent a better type to allow the I/O to remain lazy.
@@ -1086,6 +1117,7 @@ impl PythonResourceCollector {
 
         entry.is_module = true;
         entry.is_package = module.is_package;
+        entry.is_stdlib = module.is_stdlib;
 
         let bytecode = PythonModuleBytecodeProvider::FromSource(module.source.clone());
 
@@ -1654,7 +1686,9 @@ impl PythonResourceCollector {
         file: &File,
         location: &ConcreteResourceLocation,
     ) -> Result<Vec<AddResourceAction>> {
-        if !self.allow_files {
+        // Bundled shared libraries are needed by extension modules. They are
+        // accepted even if untyped files are not.
+        if !self.allow_files && !is_in_bundled_libraries_directory(&file.path_string()) {
             return Err(anyhow!(
                 "untyped files are now allowed on this resource collector"
             ));
@@ -1820,41 +1854,40 @@ impl PythonResourceCollector {
         }
     }
 
-    /// Searches for Python sources for references to __file__.
+    /// Searches in-memory Python modules for code that reads `__file__`.
     ///
-    /// __file__ usage can be problematic for in-memory modules. This method searches
-    /// for its occurrences and returns module names having it present.
-    pub fn find_dunder_file(&self) -> Result<BTreeSet<String>> {
-        let mut res = BTreeSet::new();
+    /// __file__ is not set for in-memory modules. This method returns the names
+    /// of the in-memory modules whose code reads it, mapped to whether the
+    /// module belongs to the Python standard library.
+    ///
+    /// Sources that mention `__file__` are passed to the compiler for a closer
+    /// look. If the compiler fails, the module is reported anyway.
+    pub fn find_dunder_file(
+        &self,
+        compiler: &mut dyn PythonBytecodeCompiler,
+    ) -> Result<BTreeMap<String, bool>> {
+        let mut res = BTreeMap::new();
 
         for (name, module) in &self.resources {
-            if let Some(location) = &module.in_memory_source {
-                if has_dunder_file(&location.resolve_content()?)? {
-                    res.insert(name.clone());
-                }
-            }
+            let bytecode_sources = [
+                &module.in_memory_bytecode,
+                &module.in_memory_bytecode_opt1,
+                &module.in_memory_bytecode_opt2,
+            ]
+            .into_iter()
+            .filter_map(|provider| match provider {
+                Some(PythonModuleBytecodeProvider::FromSource(location)) => Some(location),
+                _ => None,
+            });
 
-            if let Some(PythonModuleBytecodeProvider::FromSource(location)) =
-                &module.in_memory_bytecode
-            {
-                if has_dunder_file(&location.resolve_content()?)? {
-                    res.insert(name.clone());
-                }
-            }
+            for location in module.in_memory_source.iter().chain(bytecode_sources) {
+                let source = location.resolve_content()?;
 
-            if let Some(PythonModuleBytecodeProvider::FromSource(location)) =
-                &module.in_memory_bytecode_opt1
-            {
-                if has_dunder_file(&location.resolve_content()?)? {
-                    res.insert(name.clone());
-                }
-            }
-
-            if let Some(PythonModuleBytecodeProvider::FromSource(location)) =
-                &module.in_memory_bytecode_opt2
-            {
-                if has_dunder_file(&location.resolve_content()?)? {
-                    res.insert(name.clone());
+                if has_dunder_file(&source)?
+                    && compiler.reads_dunder_file(&source, name).unwrap_or(true)
+                {
+                    res.insert(name.clone(), module.is_stdlib);
+                    break;
                 }
             }
         }
@@ -2887,6 +2920,44 @@ mod tests {
                 ..PrePackagedResource::default()
             })
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_populate_parent_packages_parent_on_filesystem() -> Result<()> {
+        let parent = PrePackagedResource {
+            is_module: true,
+            name: "root".to_string(),
+            is_package: true,
+            relative_path_module_source: Some(("prefix".to_string(), FileData::Memory(vec![42]))),
+            relative_path_bytecode_opt1: Some((
+                "prefix".to_string(),
+                "tag".to_string(),
+                PythonModuleBytecodeProvider::FromSource(FileData::Memory(vec![42])),
+            )),
+            ..PrePackagedResource::default()
+        };
+
+        let mut h = BTreeMap::new();
+        h.insert("root".to_string(), parent.clone());
+        h.insert(
+            "root.child".to_string(),
+            PrePackagedResource {
+                is_module: true,
+                name: "root.child".to_string(),
+                in_memory_source: Some(FileData::Memory(vec![43])),
+                in_memory_bytecode_opt1: Some(PythonModuleBytecodeProvider::FromSource(
+                    FileData::Memory(vec![43]),
+                )),
+                ..PrePackagedResource::default()
+            },
+        );
+
+        populate_parent_packages(&mut h)?;
+
+        assert_eq!(h.len(), 2);
+        assert_eq!(h.get("root"), Some(&parent));
 
         Ok(())
     }
@@ -4660,13 +4731,14 @@ mod tests {
 
     #[test]
     fn test_find_dunder_file() -> Result<()> {
+        let mut compiler = FakeBytecodeCompiler { magic_number: 42 };
         let mut r = PythonResourceCollector::new(
             vec![AbstractResourceLocation::InMemory],
             vec![],
             false,
             false,
         );
-        assert_eq!(r.find_dunder_file()?.len(), 0);
+        assert_eq!(r.find_dunder_file(&mut compiler)?.len(), 0);
 
         r.add_python_module_source(
             &PythonModuleSource {
@@ -4679,7 +4751,7 @@ mod tests {
             },
             &ConcreteResourceLocation::InMemory,
         )?;
-        assert_eq!(r.find_dunder_file()?.len(), 0);
+        assert_eq!(r.find_dunder_file(&mut compiler)?.len(), 0);
 
         r.add_python_module_source(
             &PythonModuleSource {
@@ -4692,8 +4764,8 @@ mod tests {
             },
             &ConcreteResourceLocation::InMemory,
         )?;
-        assert_eq!(r.find_dunder_file()?.len(), 1);
-        assert!(r.find_dunder_file()?.contains("baz"));
+        assert_eq!(r.find_dunder_file(&mut compiler)?.len(), 1);
+        assert_eq!(r.find_dunder_file(&mut compiler)?.get("baz"), Some(&false));
 
         r.add_python_module_bytecode_from_source(
             &PythonModuleBytecodeFromSource {
@@ -4707,8 +4779,28 @@ mod tests {
             },
             &ConcreteResourceLocation::InMemory,
         )?;
-        assert_eq!(r.find_dunder_file()?.len(), 2);
-        assert!(r.find_dunder_file()?.contains("bytecode"));
+        assert_eq!(r.find_dunder_file(&mut compiler)?.len(), 2);
+        assert_eq!(
+            r.find_dunder_file(&mut compiler)?.get("bytecode"),
+            Some(&false)
+        );
+
+        r.add_python_module_source(
+            &PythonModuleSource {
+                name: "stdlib_module".to_string(),
+                source: FileData::Memory(Vec::from("print(__file__)")),
+                is_package: false,
+                cache_tag: DEFAULT_CACHE_TAG.to_string(),
+                is_stdlib: true,
+                is_test: false,
+            },
+            &ConcreteResourceLocation::InMemory,
+        )?;
+        assert_eq!(r.find_dunder_file(&mut compiler)?.len(), 3);
+        assert_eq!(
+            r.find_dunder_file(&mut compiler)?.get("stdlib_module"),
+            Some(&true)
+        );
 
         Ok(())
     }

@@ -37,6 +37,7 @@ use {
     simple_file_manifest::{FileData, FileEntry},
     std::{
         collections::{hash_map::RandomState, BTreeMap, HashMap},
+        ffi::OsStr,
         io::{BufRead, BufReader, Read},
         path::{Path, PathBuf},
         sync::Arc,
@@ -129,6 +130,13 @@ pub static NO_BYTECODE_MODULES: Lazy<Vec<&'static str>> = Lazy::new(|| {
         "test.test_lib2to3.data.false_encoding",
         "test.test_lib2to3.data.py2_test_grammar",
         "test.test_lib2to3.data.py3_test_grammar",
+        // Python 3.15 tests misplaced lazy imports.
+        "test.test_lazy_import.data.badsyntax.lazy_class_body",
+        "test.test_lazy_import.data.badsyntax.lazy_future_import",
+        "test.test_lazy_import.data.badsyntax.lazy_import_func",
+        "test.test_lazy_import.data.badsyntax.lazy_try_except",
+        "test.test_lazy_import.data.badsyntax.lazy_try_except_from",
+        "test.test_lazy_import.data.badsyntax.lazy_try_except_from_star",
     ]
 });
 
@@ -441,6 +449,83 @@ fn bundled_shared_library(python_path: &Path, link: &LinkEntry) -> Option<PathBu
 fn parse_python_json_from_distribution(dist_dir: &Path) -> Result<PythonJsonMain> {
     let python_json_path = dist_dir.join("python").join("PYTHON.json");
     parse_python_json(&python_json_path)
+}
+
+/// Extract the JIT object files that the core object files of a distribution lack.
+///
+/// Python 3.15 built with the experimental JIT defines `_PyJIT_Entry` in a
+/// shim object that the JIT toolchain compiles. The `JIT_OBJS` config variable
+/// names this object, but `PYTHON.json` of python-build-standalone does not
+/// list it among the core object files. The static libpython of the
+/// distribution contains it. Each missing object is extracted from there into
+/// `build/jit` of the distribution.
+///
+/// Returns the relative and the absolute path of each extracted object.
+fn extract_jit_objects(
+    python_path: &Path,
+    config_vars: &HashMap<String, String>,
+    objs_core: &BTreeMap<PathBuf, PathBuf>,
+) -> Result<Vec<(PathBuf, PathBuf)>> {
+    let missing = config_vars
+        .get("JIT_OBJS")
+        .map(|objs| objs.split_whitespace().collect::<Vec<_>>())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| {
+            !objs_core
+                .keys()
+                .any(|path| path.file_name() == Some(OsStr::new(name)))
+        })
+        .collect::<Vec<_>>();
+
+    if missing.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let library = config_vars
+        .get("LIBRARY")
+        .ok_or_else(|| anyhow!("distribution with JIT objects does not define LIBRARY"))?;
+    let library_path = python_path.join("install").join("lib").join(library);
+
+    let mut archive =
+        ar::Archive::new(std::fs::File::open(&library_path).with_context(|| {
+            format!("opening {} to extract JIT objects", library_path.display())
+        })?);
+
+    let dest_dir = python_path.join("build").join("jit");
+    std::fs::create_dir_all(&dest_dir)?;
+
+    let mut extracted = vec![];
+
+    while let Some(entry) = archive.next_entry() {
+        let mut entry = entry.context("reading static libpython")?;
+
+        // GNU ar terminates member names with a slash.
+        let name = String::from_utf8_lossy(entry.header().identifier())
+            .trim_end_matches('/')
+            .to_string();
+
+        if missing.contains(&name.as_str()) {
+            let mut data = vec![];
+            entry.read_to_end(&mut data)?;
+
+            let rel_path = PathBuf::from("build").join("jit").join(&name);
+            let full_path = dest_dir.join(&name);
+            std::fs::write(&full_path, data)?;
+
+            extracted.push((rel_path, full_path));
+        }
+    }
+
+    if extracted.len() != missing.len() {
+        return Err(anyhow!(
+            "{} does not contain all JIT objects: {}",
+            library_path.display(),
+            missing.join(", ")
+        ));
+    }
+
+    Ok(extracted)
 }
 
 fn parse_python_major_minor_version(version: &str) -> String {
@@ -957,6 +1042,12 @@ impl StandaloneDistribution {
             let rel_path = PathBuf::from(obj);
             let full_path = python_path.join(obj);
 
+            objs_core.insert(rel_path, full_path);
+        }
+
+        for (rel_path, full_path) in
+            extract_jit_objects(&python_path, &pi.python_config_vars, &objs_core)?
+        {
             objs_core.insert(rel_path, full_path);
         }
 
@@ -1945,6 +2036,35 @@ pub mod tests {
         Ok(())
     }
 
+    /// The JIT objects of Python 3.15 are among the core object files.
+    #[test]
+    fn test_jit_objects() -> Result<()> {
+        let dists = get_all_standalone_distributions_matching(|record| {
+            record.python_major_minor_version == "3.15"
+                && !record.target_triple.contains("-windows-")
+        })?;
+        assert!(!dists.is_empty());
+
+        for dist in dists {
+            let jit_objs = dist
+                .config_vars
+                .get("JIT_OBJS")
+                .map(|objs| objs.split_whitespace().collect::<Vec<_>>())
+                .unwrap_or_default();
+
+            for name in jit_objs {
+                let path = dist
+                    .objs_core
+                    .values()
+                    .find(|path| path.file_name() == Some(OsStr::new(name)))
+                    .unwrap_or_else(|| panic!("{} lacks {}", dist.target_triple, name));
+                assert!(path.exists(), "{}", path.display());
+            }
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn test_tcl_files() -> Result<()> {
         for dist in get_all_standalone_distributions()? {
@@ -1982,6 +2102,57 @@ pub mod tests {
             .to_string()
             .starts_with("compiling error: invalid syntax"));
 
+        temp_dir.close()?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn compiler_reads_dunder_file() -> Result<()> {
+        let env = get_env()?;
+        let dist = get_default_distribution(None)?;
+
+        let temp_dir = env.temporary_directory("pyoxidizer-test")?;
+        let mut compiler = BytecodeCompiler::new(dist.python_exe_path(), temp_dir.path())?;
+
+        for (source, expected) in [
+            ("# x = __file__\n", false),
+            ("\"\"\"Usage: __file__ input\"\"\"\n", false),
+            ("ns = {\"__file__\": 1}\nns[\"__file__\"]\n", false),
+            ("import sys\ngetattr(sys, \"__file__\", None)\n", false),
+            (
+                "import types\nm = types.ModuleType('m')\nm.__file__ = 'x'\n",
+                false,
+            ),
+            ("print(__file__)\n", true),
+            ("import os\nos.__file__\n", true),
+            ("f\"{__file__}\"\n", true),
+            (
+                "def f():\n    def g():\n        return __file__\n    return g\n",
+                true,
+            ),
+            (
+                "class A:\n    def f(self):\n        return self.__file__\n",
+                true,
+            ),
+        ] {
+            assert_eq!(
+                compiler.reads_dunder_file(source.as_bytes(), "foo.py")?,
+                expected,
+                "{:?}",
+                source
+            );
+        }
+
+        let err = compiler
+            .reads_dunder_file(b"__file__ (", "foo.py")
+            .unwrap_err();
+        assert!(err.to_string().starts_with("checking for __file__: "));
+
+        // The process keeps working after an error.
+        assert!(compiler.reads_dunder_file(b"__file__\n", "foo.py")?);
+
+        drop(compiler);
         temp_dir.close()?;
 
         Ok(())

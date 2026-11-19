@@ -48,10 +48,12 @@ where
                 entry.in_memory_bytecode.is_some() || entry.relative_path_module_bytecode.is_some()
             }
             BytecodeOptimizationLevel::One => {
-                entry.in_memory_bytecode_opt1.is_some() || entry.in_memory_bytecode_opt1.is_some()
+                entry.in_memory_bytecode_opt1.is_some()
+                    || entry.relative_path_module_bytecode_opt1.is_some()
             }
             BytecodeOptimizationLevel::Two => {
-                entry.in_memory_bytecode_opt2.is_some() || entry.in_memory_bytecode_opt2.is_some()
+                entry.in_memory_bytecode_opt2.is_some()
+                    || entry.relative_path_module_bytecode_opt2.is_some()
             }
         }
 }
@@ -650,6 +652,10 @@ impl<'a> PythonResourcesState<'a, u8> {
             #[cfg(not(Py_3_14))]
             frozen_stdlib_modules.push("os.path");
 
+            // Python 3.15 freezes `linecache` for the interactive interpreter.
+            #[cfg(Py_3_15)]
+            frozen_stdlib_modules.push("linecache");
+
             for name in &frozen_stdlib_modules {
                 self.index_frozen_module_by_name(name)?;
             }
@@ -853,6 +859,18 @@ impl<'a> PythonResourcesState<'a, u8> {
         Ok(None)
     }
 
+    /// Obtain the filesystem path of a package resource stored next to the binary.
+    ///
+    /// Returns `None` if the resource is unknown or is only available in memory.
+    pub fn package_resource_path(&self, package: &str, resource_name: &str) -> Option<PathBuf> {
+        self.resources
+            .get(package)?
+            .relative_path_package_resources
+            .as_ref()?
+            .get(resource_name)
+            .map(|path| self.origin.join(path))
+    }
+
     /// Determines whether a specific package + name pair is a known Python package resource.
     pub fn is_package_resource(&self, package: &str, resource_name: &str) -> bool {
         if let Some(entry) = self.resources.get(package) {
@@ -978,6 +996,60 @@ impl<'a> PythonResourcesState<'a, u8> {
         }
 
         entries.into_iter().collect::<Vec<_>>()
+    }
+
+    /// Resolve the names of files and directories directly in a package resources directory.
+    ///
+    /// Unlike [Self::package_resources_list_directory], sub-directories containing
+    /// resources are included. The empty string denotes the package itself.
+    pub fn package_resources_directory_entries(&self, package: &str, name: &str) -> Vec<String> {
+        let name = name.replace('\\', "/");
+        let name = name.trim_end_matches('/');
+
+        let prefix = if name.is_empty() {
+            "".to_string()
+        } else {
+            format!("{}/", name)
+        };
+
+        let filter_map_resource = |path: &'_ Cow<'_, str>| -> Option<String> {
+            path.strip_prefix(&prefix)
+                .and_then(|child| child.split('/').next())
+                .filter(|child| !child.is_empty())
+                .map(|child| child.to_string())
+        };
+
+        let mut entries = BTreeSet::new();
+
+        if let Some(entry) = self.resources.get(package) {
+            if let Some(resources) = &entry.in_memory_package_resources {
+                entries.extend(resources.keys().filter_map(filter_map_resource));
+            }
+
+            if let Some(resources) = &entry.relative_path_package_resources {
+                entries.extend(resources.keys().filter_map(filter_map_resource));
+            }
+        }
+
+        entries.into_iter().collect::<Vec<_>>()
+    }
+
+    /// Resolve the leaf names of Python packages that are direct children of a package.
+    pub fn child_package_names(&self, package: &str) -> Vec<String> {
+        let prefix = format!("{}.", package);
+
+        let mut names = self
+            .resources
+            .values()
+            .filter(|r| r.is_python_package)
+            .filter_map(|r| r.name.strip_prefix(&prefix))
+            .filter(|name| !name.contains('.'))
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>();
+
+        names.sort();
+
+        names
     }
 
     /// Attempt to resolve a PyBytes for resource data given a relative path.

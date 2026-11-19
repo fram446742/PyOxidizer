@@ -168,6 +168,39 @@ to be handled by the operating system's default rules. And this means
 that the shared library file must exist on the filesystem, next to a
 file-based extension module.
 
+PyOxidizer recognizes :py:class:`PythonPackageResource` and :py:class:`File`
+resources with names ending in ``.dll``, ``.dylib`` or ``.so`` (including
+versioned names like ``libfoo.so.1``) as shared libraries. Nothing can load
+such a file from memory. If a shared library would be embedded in memory,
+it is placed at
+:py:attr:`PythonPackagingPolicy.resources_location_fallback` instead,
+provided that the fallback is a ``filesystem-relative`` location. Without
+such a fallback, the resource stays in memory and a warning is printed.
+This happens after resource callbacks run. ``add_location`` in a callback
+still shows ``in-memory`` for these resources.
+
+auditwheel (Linux) and delvewheel (Windows) copy the shared libraries of a
+wheel into a ``<name>.libs`` directory next to the package, e.g.
+``numpy.libs``. Every file in a directory whose name ends in ``.libs`` is
+treated as a shared library. This includes files that are not libraries
+themselves, such as the ``.load-order-*`` file of delvewheel. A ``.libs``
+directory outside any package is not part of a Python package. Its files
+are emitted as :py:class:`File` resources and are included even if
+:py:attr:`PythonPackagingPolicy.allow_files` and
+:py:attr:`PythonPackagingPolicy.include_file_resources` are ``False``.
+
+delvewheel also adds a function named ``_delvewheel_patch_<version>`` (or
+``_delvewheel_init_patch_<version>`` in older releases) to the
+``__init__.py`` of the package. The function puts the ``<name>.libs``
+directory on the DLL search path and finds it using ``__file__``, which is
+only set for modules whose source is stored on the filesystem. PyOxidizer
+detects modules containing this function. Their source is always stored,
+and if they would be embedded in memory, they are placed at
+:py:attr:`PythonPackagingPolicy.resources_location_fallback` instead,
+provided that the fallback is a ``filesystem-relative`` location. The other
+modules of the package are not affected. Without such a fallback, the
+module stays in memory and a warning is printed.
+
 .. _packaging_extension_modules_no_source_builds:
 
 Extension Modules Are Not Compiled as Built-ins

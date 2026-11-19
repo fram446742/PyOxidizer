@@ -128,6 +128,22 @@ is found, it is used. Otherwise, it is assumed the resource doesn't exist.
 The ``OxidizedResourceReader.contents()`` method will return a list of all
 keys in the internal resources index.
 
+``OxidizedResourceReader.files()`` returns an
+:py:class:`OxidizedResourceTraversable`, which is what
+``importlib.resources.files()`` and the functions built on it (e.g.
+``importlib.resources.read_text()``) use. It presents the resources index
+as a directory tree: resource names containing ``/`` become
+sub-directories, and child packages appear as directories of their parent
+package. ``iterdir()`` therefore lists only the direct children of a
+directory, like the filesystem-based implementation does.
+
+Resources stored in a filesystem-relative location are returned as
+``pathlib.Path`` instances pointing to the installed file.
+``importlib.resources.as_file()`` and
+:py:meth:`OxidizedResourceReader.resource_path` therefore yield the real
+file, for example to load a bundled shared library with ``ctypes``. For
+resources in memory, ``as_file()`` writes a temporary copy instead.
+
 :py:class:`OxidizedResourceReader` works the same way for in-memory and
 filesystem-relative resource locations because internally
 both use the same index of resources to drive execution: only the location

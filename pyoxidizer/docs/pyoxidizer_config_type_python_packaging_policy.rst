@@ -24,6 +24,9 @@
         If true, :py:class:`File` instances can be added to resource
         collectors.
 
+        Files in a ``<name>.libs`` directory of bundled shared libraries can
+        always be added. See :ref:`packaging_extension_modules`.
+
     .. py:attribute:: allow_in_memory_shared_library_loading
 
         (``bool``)
@@ -39,6 +42,10 @@
         This flag defines whether to enable this feature where supported. Its
         true value can be ignored if the target platform doesn't support loading
         shared library from memory.
+
+        Loading extension modules from memory is currently only supported on
+        Windows with Python 3.12 or older. With Python 3.13 or newer, this flag
+        is ignored and a warning is logged.
 
     .. py:attribute:: bytecode_optimize_level_zero
 
@@ -58,6 +65,45 @@
         (``bool``)
 
         Whether to add Python bytecode at optimization level 2.
+
+    .. py:attribute:: dunder_file_allowed_packages
+
+        (``list<string>``)
+
+        Packages whose modules are known to work without ``__file__``.
+
+        When building, PyOxidizer looks for embedded modules whose code reads
+        ``__file__``, which is not set for modules imported from memory.
+        Modules in the standard library and modules in the packages listed
+        here only produce a note. Any other module reading ``__file__``
+        produces a warning that lists the affected modules. In GitHub Actions,
+        the warning is also emitted as an annotation on the job.
+
+        Each entry covers the named package or module and all modules below
+        it. For example, ``["foo"]`` covers ``foo`` and ``foo.bar`` but not
+        ``foobar``.
+
+        Assigning ``None`` clears the list.
+
+        Default is an empty list.
+
+    .. py:attribute:: excluded_packages
+
+        (``list<string>``)
+
+        Packages whose resources are left out of the build.
+
+        Each entry covers the named package or module and everything below
+        it, including the distribution metadata of a distribution with the
+        same name. For example, ``["foo"]`` covers ``foo`` and ``foo.bar`` but
+        not ``foobar``.
+
+        Extension modules are not affected, because PyOxidizer currently adds
+        them regardless of their ``add_include`` attribute.
+
+        Assigning ``None`` clears the list.
+
+        Default is an empty list.
 
     .. py:attribute:: extension_module_filter
 
@@ -131,6 +177,39 @@
 
         Default is ``False``.
 
+    .. py:attribute:: filesystem_packages
+
+        (``list<string>``)
+
+        Packages whose resources are placed on the filesystem.
+
+        Use this for packages that do not work when imported from memory,
+        e.g. because they need ``__file__`` or their own source code. The
+        resources of these packages are placed at
+        :py:attr:`PythonPackagingPolicy.filesystem_packages_location`, without
+        a fallback location. The source code of their modules is always
+        stored, regardless of
+        :py:attr:`PythonPackagingPolicy.include_non_distribution_sources`.
+
+        Each entry covers the named package or module and everything below
+        it, including the distribution metadata of a distribution with the
+        same name. For example, ``["foo"]`` covers ``foo`` and ``foo.bar`` but
+        not ``foobar``.
+
+        Assigning ``None`` clears the list.
+
+        Default is an empty list.
+
+    .. py:attribute:: filesystem_packages_location
+
+        (``string``)
+
+        The location of the resources of
+        :py:attr:`PythonPackagingPolicy.filesystem_packages`. It must be a
+        ``filesystem-relative:<prefix>`` location.
+
+        Default is ``filesystem-relative:lib``.
+
     .. py:attribute:: include_classified_resources
 
         (``bool``)
@@ -165,6 +244,9 @@
         Whether :py:class:`File` resources have their ``add_include`` attribute
         set to ``True`` by default.
 
+        Files in a ``<name>.libs`` directory of bundled shared libraries are
+        always included by default.
+
         Default is ``False``.
 
     .. py:attribute:: include_non_distribution_sources
@@ -174,6 +256,8 @@
         Whether to add source code for Python modules not in the Python
         distribution.
 
+        Default is ``True``.
+
     .. py:attribute:: include_test
 
         (``bool``)
@@ -181,7 +265,10 @@
         Whether to add Python resources related to tests.
 
         Not all files associated with tests may be properly flagged as such.
-        This is a best effort setting.
+        This is a best effort setting. By default only the test packages of
+        the standard library are flagged. Use
+        :py:attr:`PythonPackagingPolicy.test_package_names` to flag the tests
+        of other packages.
 
         Default is ``False``.
 
@@ -199,6 +286,11 @@
 
         The fallback location that resources should be added to if
         ``resources_location`` fails.
+
+        Shared libraries stored as package resources or files are placed
+        here when ``resources_location`` is ``in-memory`` and this is a
+        ``filesystem-relative`` location, since they cannot be loaded from
+        memory. See :ref:`packaging_extension_modules` for details.
 
         Default is ``None``.
 
@@ -242,6 +334,31 @@
 
         Default is ``None``.
 
+    .. py:attribute:: test_package_names
+
+        (``list<string>``)
+
+        Package names that mark resources as tests.
+
+        A resource is a test if any package in its name has one of these
+        names. For example, ``["tests"]`` marks ``foo.tests``,
+        ``foo.tests.test_bar`` and the package resources in ``foo.tests``.
+        Only package names count: a module that is not a package is never a
+        test by its own name. This keeps runtime modules such as
+        ``jinja2.tests`` or ``werkzeug.test``. When the list is not empty,
+        ``conftest`` modules are also tests.
+
+        Resources marked here are handled like the standard library test
+        packages: they are left out unless
+        :py:attr:`PythonPackagingPolicy.include_test` is ``True``.
+
+        A typical value is
+        ``["test", "tests", "_test", "_tests", "benchmarks"]``.
+
+        Assigning ``None`` clears the list.
+
+        Default is an empty list.
+
 
     .. py:method:: register_resource_callback(f: Callable)
 
@@ -253,6 +370,11 @@
         The purpose of the callback is to enable Starlark configuration files to
         mutate resources upon creation so they can globally influence how those
         resources are packaged.
+
+        The callback receives every type of resource, including
+        :py:class:`File` resources for bundled shared libraries in
+        ``<name>.libs`` directories. See :ref:`packaging_resource_callback` for
+        the attributes that differ between resource types.
 
     .. py:method:: set_preferred_extension_module_variant(extension: str, variant: str)
 

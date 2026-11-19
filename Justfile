@@ -244,14 +244,34 @@ actions-install-sccache-linux:
   chmod +x /home/runner/.cargo/bin/sccache
 
 actions-install-sccache-macos:
+  #!/usr/bin/env bash
+  set -euxo pipefail
+
+  if [ "$(uname -m)" = "arm64" ]; then
+    triple=aarch64-apple-darwin
+    sha256=751453b31048f8ba1e7d646be8d76d64ad0a16ecb17d17edb523b01eda25b7a8
+  else
+    triple=x86_64-apple-darwin
+    sha256=e68aa0e2716e9cceff7912e09d8028df34cd63d8d60cae832a2d5f5c94da1828
+  fi
+
   python3 scripts/secure_download.py \
-    https://github.com/mozilla/sccache/releases/download/v0.3.3/sccache-v0.3.3-x86_64-apple-darwin.tar.gz \
-    e68aa0e2716e9cceff7912e09d8028df34cd63d8d60cae832a2d5f5c94da1828 \
+    https://github.com/mozilla/sccache/releases/download/v0.3.3/sccache-v0.3.3-${triple}.tar.gz \
+    ${sha256} \
     sccache.tar.gz
   tar -xvzf sccache.tar.gz
-  mv sccache-v0.3.3-x86_64-apple-darwin/sccache /Users/runner/.cargo/bin/sccache
+
+  # Runner images may provide rustup via Homebrew, in which case
+  # $CARGO_HOME/bin is neither created nor added to PATH.
+  bin_dir="${CARGO_HOME:-$HOME/.cargo}/bin"
+  mkdir -p "${bin_dir}"
+  mv sccache-v0.3.3-${triple}/sccache "${bin_dir}/sccache"
   rm -rf sccache*
-  chmod +x /Users/runner/.cargo/bin/sccache
+  chmod +x "${bin_dir}/sccache"
+
+  if [ -n "${GITHUB_PATH:-}" ]; then
+    echo "${bin_dir}" >> "${GITHUB_PATH}"
+  fi
 
 actions-install-sccache-windows:
   python3 scripts/secure_download.py \
@@ -334,17 +354,16 @@ pyoxy-build-linux-all:
 
   PYOXY_VERSION=$(cargo metadata --manifest-path pyoxy/Cargo.toml --no-deps | jq --raw-output '.packages[] | select(.name == "pyoxy") | .version')
 
-  just pyoxy-build-linux-stage ${PYOXY_VERSION} x86_64-unknown-linux-gnu 3.10
   just pyoxy-build-linux-stage ${PYOXY_VERSION} x86_64-unknown-linux-gnu 3.11
   just pyoxy-build-linux-stage ${PYOXY_VERSION} x86_64-unknown-linux-gnu 3.12
   just pyoxy-build-linux-stage ${PYOXY_VERSION} x86_64-unknown-linux-gnu 3.13
   just pyoxy-build-linux-stage ${PYOXY_VERSION} x86_64-unknown-linux-gnu 3.14
+  just pyoxy-build-linux-stage ${PYOXY_VERSION} x86_64-unknown-linux-gnu 3.15
 
 actions-build-pyoxy-macos triple python_version:
   #!/usr/bin/env bash
   set -euxo pipefail
 
-  export SDKROOT=/Applications/Xcode_15.0.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX14.0.sdk
   export MACOSX_DEPLOYMENT_TARGET={{macosx_deployment_target}}
   pyoxidizer build --release --target-triple {{triple}} --path pyoxy --var PYTHON_VERSION {{python_version}}
   PYO3_CONFIG_FILE=$(pwd)/pyoxy/build/{{triple}}/release/resources/pyo3-build-config-file.txt cargo build --bin pyoxy --target {{triple}} --release
@@ -495,7 +514,7 @@ pyoxy-release-prepare commit tag:
   rm -rf dist/pyoxy*
   just assemble-exe-artifacts pyoxy {{commit}} dist/pyoxy-artifacts
 
-  for py in 3.10 3.11 3.12 3.13 3.14; do
+  for py in 3.11 3.12 3.13 3.14 3.15; do
     for triple in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu macos-universal; do
       release_name=pyoxy-{{tag}}-${triple}-cpython${py}
       source=dist/pyoxy-artifacts/exe-pyoxy-${triple}-${py}
@@ -543,11 +562,24 @@ oxidized_importer-release-prepare commit tag:
   mkdir dist/oxidized_importer
   cp dist/oxidized_importer-artifacts/wheels/*.whl dist/oxidized_importer
 
+  # The wheel version comes from pyproject.toml. Refuse to continue if it does
+  # not match the release, e.g. because the wrong commit was given.
+  for whl in dist/oxidized_importer/*.whl; do
+    if [[ "$(basename ${whl})" != oxidized_importer-{{tag}}-* ]]; then
+      echo "wheel ${whl} does not match version {{tag}}"
+      exit 1
+    fi
+  done
+
   just _create_shasums dist/oxidized_importer
 
+# Upload oxidized_importer release wheels to the private package index.
+#
+# `cargo release -p python-oxidized-importer` creates the release commit and
+# tag. This fork does not create GitHub releases and is not published on
+# pypi.org. The arguments are kept for symmetry with the prepare step.
 oxidized_importer-release-upload commit tag:
-  just _upload_release oxidized_importer 'Oxidized Importer Python Extension' {{commit}} {{tag}}
-  twine upload dist/oxidized_importer/*.whl
+  twine upload --repository {{pypi_repository}} dist/oxidized_importer/*.whl
 
 oxidized_importer-release commit tag:
   just oxidized_importer-release-prepare {{commit}} {{tag}}
@@ -700,7 +732,7 @@ pyoxidizer-release:
 pyoxidizer-update-python-distributions: _python_scripts_venv
   venv/bin/python3 \
     scripts/fetch-python-distributions.py \
-    --tag 20261003 > pyoxidizer/src/default_python_distributions.rs
+    --tag 20261110 > pyoxidizer/src/default_python_distributions.rs
   rustfmt pyoxidizer/src/default_python_distributions.rs
 
 # Perform Rust crate releases.

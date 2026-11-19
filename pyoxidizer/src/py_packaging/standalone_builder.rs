@@ -29,9 +29,11 @@ use {
         },
         location::{AbstractResourceLocation, ConcreteResourceLocation},
         policy::PythonPackagingPolicy,
+        python_source::has_delvewheel_patch,
         resource::{
-            PythonExtensionModule, PythonModuleSource, PythonPackageDistributionResource,
-            PythonPackageResource, PythonResource,
+            is_in_bundled_libraries_directory, is_shared_library_filename, PythonExtensionModule,
+            PythonModuleSource, PythonPackageDistributionResource, PythonPackageResource,
+            PythonResource,
         },
         resource_collection::{
             AddResourceAction, PrePackagedResource, PythonResourceAddCollectionContext,
@@ -122,6 +124,22 @@ pub struct StandalonePythonExecutableBuilder {
     windows_runtime_dlls_mode: WindowsRuntimeDllsMode,
 }
 
+/// Whether `oxidized_importer` can load extension modules from memory on a Python version.
+///
+/// The Windows implementation relies on CPython internals that are no longer
+/// available in Python 3.13. See `oxidized_importer_windows_in_memory_extensions.rst`
+/// in the `oxidized_importer` documentation.
+fn importer_supports_in_memory_shared_library_loading(python_major_minor_version: &str) -> bool {
+    let mut parts = python_major_minor_version
+        .split('.')
+        .map(|part| part.parse::<u32>().ok());
+
+    match (parts.next().flatten(), parts.next().flatten()) {
+        (Some(major), Some(minor)) => (major, minor) < (3, 13),
+        _ => false,
+    }
+}
+
 impl StandalonePythonExecutableBuilder {
     #[allow(clippy::too_many_arguments)]
     pub fn from_distribution(
@@ -169,8 +187,21 @@ impl StandalonePythonExecutableBuilder {
             }
         };
 
-        let supports_in_memory_dynamically_linked_extension_loading =
-            target_distribution.supports_in_memory_shared_library_loading();
+        let supports_in_memory_dynamically_linked_extension_loading = target_distribution
+            .supports_in_memory_shared_library_loading()
+            && importer_supports_in_memory_shared_library_loading(
+                &target_distribution.python_major_minor_version(),
+            );
+
+        if target_distribution.supports_in_memory_shared_library_loading()
+            && packaging_policy.allow_in_memory_shared_library_loading()
+            && !supports_in_memory_dynamically_linked_extension_loading
+        {
+            warn!(
+                "extension modules cannot be loaded from memory with Python {}; ignoring allow_in_memory_shared_library_loading",
+                target_distribution.python_major_minor_version()
+            );
+        }
 
         let mut allowed_locations = vec![AbstractResourceLocation::from(
             packaging_policy.resources_location(),
@@ -410,6 +441,167 @@ impl StandalonePythonExecutableBuilder {
         }
 
         Ok(manifest)
+    }
+}
+
+impl StandalonePythonExecutableBuilder {
+    /// Moves a shared library from memory to the fallback location.
+    ///
+    /// Shared libraries stored as resources must exist as files to be loaded,
+    /// whether by `ctypes` or by the dynamic linker on behalf of an extension
+    /// module. If the resource would be stored in memory, it goes to the
+    /// fallback location instead when that is on the filesystem. Otherwise a
+    /// warning is logged.
+    ///
+    /// Every file in a `.libs` directory is treated as a shared library. Such
+    /// directories also hold files that the loader code of the package reads,
+    /// e.g. the `.load-order-*` file of delvewheel.
+    fn place_shared_library_on_filesystem(
+        name: &str,
+        add_context: &mut PythonResourceAddCollectionContext,
+    ) {
+        if add_context.include && !Self::move_to_filesystem_fallback(add_context) {
+            warn!(
+                "shared library {} is embedded in memory, where it cannot be loaded; set a filesystem-relative resources_location_fallback or add_location",
+                name
+            );
+        }
+    }
+
+    /// Moves a module patched by delvewheel from memory to the fallback location.
+    ///
+    /// delvewheel adds a function to the `__init__.py` of a package that puts
+    /// the `<name>.libs` directory of the package on the DLL search path. The
+    /// function locates the directory using `__file__`, which is only set for
+    /// modules whose source is stored on the filesystem. The source of the
+    /// module is always stored. If the module would be stored in memory, it
+    /// goes to the fallback location instead when that is on the filesystem.
+    /// Otherwise a warning is logged.
+    fn place_delvewheel_module_on_filesystem(
+        name: &str,
+        add_context: &mut PythonResourceAddCollectionContext,
+    ) {
+        if !add_context.include {
+            return;
+        }
+
+        add_context.store_source = true;
+
+        if !Self::move_to_filesystem_fallback(add_context) {
+            warn!(
+                "module {} is embedded in memory, where __file__ is not set, but its delvewheel patch reads __file__; set a filesystem-relative resources_location_fallback or add_location",
+                name
+            );
+        }
+    }
+
+    /// Moves a resource from memory to the fallback location.
+    ///
+    /// Returns false if the resource stays in memory because the fallback
+    /// location is not on the filesystem.
+    fn move_to_filesystem_fallback(add_context: &mut PythonResourceAddCollectionContext) -> bool {
+        if add_context.location != ConcreteResourceLocation::InMemory {
+            return true;
+        }
+
+        match &add_context.location_fallback {
+            Some(fallback @ ConcreteResourceLocation::RelativePath(_)) => {
+                add_context.location = fallback.clone();
+                add_context.location_fallback = None;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Reports embedded modules that read `__file__`.
+    ///
+    /// PyOxidizer does not set `__file__`. Standard library modules referring
+    /// to it cannot be changed, and modules in allowed packages are known to
+    /// handle its absence. If all affected modules fall into these groups, only
+    /// a note is printed. Otherwise a warning lists the remaining modules and
+    /// is also emitted as a GitHub Actions annotation.
+    fn report_dunder_file_modules(&self, compiler: &mut BytecodeCompiler) -> Result<()> {
+        let mut stdlib = vec![];
+        let mut allowed = vec![];
+        let mut other = vec![];
+
+        for (name, is_stdlib) in self.resources_collector.find_dunder_file(compiler)? {
+            if is_stdlib {
+                stdlib.push(name);
+            } else if self.packaging_policy.is_dunder_file_allowed(&name) {
+                allowed.push(name);
+            } else {
+                other.push(name);
+            }
+        }
+
+        if stdlib.is_empty() && allowed.is_empty() && other.is_empty() {
+            return Ok(());
+        }
+
+        fn count(n: usize, kind: &str) -> String {
+            format!(
+                "{} {}{}",
+                n,
+                kind,
+                if n == 1 { "module" } else { "modules" }
+            )
+        }
+
+        let ignored = [
+            (stdlib.len(), "standard library "),
+            (allowed.len(), "allowed "),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, kind)| count(n, kind))
+        .collect::<Vec<_>>()
+        .join(" and ");
+
+        with_shell(|log| -> Result<()> {
+            if other.is_empty() {
+                log.note(format!("__file__ was encountered in {}", ignored))?;
+            } else {
+                let summary = format!(
+                    "__file__ was encountered in {} outside the standard library and \
+                     PythonPackagingPolicy.dunder_file_allowed_packages",
+                    count(other.len(), "")
+                );
+
+                log.warn(format!("{}: {}", summary, other.join(", ")))?;
+                log.github_warning(
+                    "__file__ in embedded modules",
+                    format!("{}:\n{}", summary, other.join("\n")),
+                )?;
+                if !ignored.is_empty() {
+                    log.note(format!("__file__ was also encountered in {}", ignored))?;
+                }
+                log.note(
+                    "PyOxidizer does not set __file__ and this may create problems at run-time",
+                )?;
+                log.note("add packages that work without __file__ to PythonPackagingPolicy.dunder_file_allowed_packages")?;
+                log.note("or ship them unpacked so they have a real __file__: pyoxidizer package --unpack")?;
+                log.note("see https://github.com/indygreg/PyOxidizer/issues/69 for more")?;
+            }
+
+            log.verbose(|log| {
+                if !stdlib.is_empty() {
+                    log.note(format!(
+                        "standard library modules referring to __file__: {}",
+                        stdlib.join(", ")
+                    ))?;
+                }
+                if !allowed.is_empty() {
+                    log.note(format!(
+                        "allowed modules referring to __file__: {}",
+                        allowed.join(", ")
+                    ))?;
+                }
+
+                Ok(())
+            })
+        })
     }
 }
 
@@ -773,10 +965,14 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
         module: &PythonModuleSource,
         add_context: Option<PythonResourceAddCollectionContext>,
     ) -> Result<Vec<AddResourceAction>> {
-        let add_context = add_context.unwrap_or_else(|| {
+        let mut add_context = add_context.unwrap_or_else(|| {
             self.packaging_policy
                 .derive_add_collection_context(&module.into())
         });
+
+        if has_delvewheel_patch(&module.source.resolve_content()?) {
+            Self::place_delvewheel_module_on_filesystem(&module.name, &mut add_context);
+        }
 
         self.resources_collector
             .add_python_module_source_with_context(module, &add_context)
@@ -787,10 +983,16 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
         resource: &PythonPackageResource,
         add_context: Option<PythonResourceAddCollectionContext>,
     ) -> Result<Vec<AddResourceAction>> {
-        let add_context = add_context.unwrap_or_else(|| {
+        let mut add_context = add_context.unwrap_or_else(|| {
             self.packaging_policy
                 .derive_add_collection_context(&resource.into())
         });
+
+        if resource.is_shared_library()
+            || is_in_bundled_libraries_directory(&resource.relative_name)
+        {
+            Self::place_shared_library_on_filesystem(&resource.symbolic_name(), &mut add_context);
+        }
 
         self.resources_collector
             .add_python_package_resource_with_context(resource, &add_context)
@@ -856,10 +1058,16 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
         file: &File,
         add_context: Option<PythonResourceAddCollectionContext>,
     ) -> Result<Vec<AddResourceAction>> {
-        let add_context = add_context.unwrap_or_else(|| {
+        let mut add_context = add_context.unwrap_or_else(|| {
             self.packaging_policy
                 .derive_add_collection_context(&file.into())
         });
+
+        let path = file.path_string();
+
+        if is_shared_library_filename(&path) || is_in_bundled_libraries_directory(&path) {
+            Self::place_shared_library_on_filesystem(&path, &mut add_context);
+        }
 
         self.resources_collector
             .add_file_data_with_context(file, &add_context)
@@ -914,44 +1122,10 @@ impl PythonBinaryBuilder for StandalonePythonExecutableBuilder {
         env: &Environment,
         opt_level: &str,
     ) -> Result<EmbeddedPythonContext<'_>> {
-        let modules_with_dunder_file = self.resources_collector.find_dunder_file()?;
-        let num_modules = modules_with_dunder_file.len();
-
-        if num_modules > 0 {
-            with_shell(|log| -> Result<()> {
-                // Embedded modules have no path, so code reading __file__ sees
-                // a NameError at run time. Name the consequence and the way
-                // out instead of leaving a bare count.
-                if num_modules == 1 {
-                    log.warn(
-                        "1 embedded module reads __file__, which embedded resources do not provide: it fails if that code path runs. Ship the package unpacked (`pyoxidizer package --unpack`) when it matters.",
-                    )?;
-                } else {
-                    log.warn(format!(
-                        "{} embedded modules read __file__, which embedded resources do not provide: they fail if those code paths run. Ship the packages unpacked (`pyoxidizer package --unpack`) when it matters.",
-                        num_modules
-                    ))?;
-                }
-
-                log.verbose(|log| {
-                    let mut examples = modules_with_dunder_file.iter().take(5).cloned().collect::<Vec<String>>();
-                    
-                    if modules_with_dunder_file.len() > 5 {
-                        examples.push("...".to_string());
-                    }
-                    
-                    log.warn(examples.join(", "))?;
-                    log.note("PyOxidizer does not set __file__ and this may create problems at run-time")?;
-                    log.note("See https://github.com/indygreg/PyOxidizer/issues/69 for more")?;
-    
-                    Ok(())
-                })
-            })?;
-        }
-
         let compiled_resources = {
             let temp_dir = env.temporary_directory("pyoxidizer-bytecode-compile")?;
             let mut compiler = BytecodeCompiler::new(self.host_python_exe_path(), temp_dir.path())?;
+            self.report_dunder_file_modules(&mut compiler)?;
             let resources = self.resources_collector.compile_resources(&mut compiler)?;
 
             temp_dir.close().context("closing temporary directory")?;
@@ -1792,6 +1966,200 @@ pub mod tests {
     }
 
     #[test]
+    fn test_shared_library_resources_placed_on_filesystem() -> Result<()> {
+        let options = StandalonePythonExecutableBuilderOptions {
+            extension_module_filter: Some(ExtensionModuleFilter::Minimal),
+            resources_location: Some(ConcreteResourceLocation::InMemory),
+            resources_location_fallback: Some(Some(ConcreteResourceLocation::RelativePath(
+                "lib".to_string(),
+            ))),
+            ..StandalonePythonExecutableBuilderOptions::default()
+        };
+
+        let mut builder = options.new_builder()?;
+        assert!(!builder.python_packaging_policy().allow_files());
+
+        let package_resource = |relative_name: &str| PythonPackageResource {
+            leaf_package: "foo".to_string(),
+            relative_name: relative_name.to_string(),
+            data: FileData::Memory(vec![42]),
+            is_stdlib: false,
+            is_test: false,
+        };
+
+        for relative_name in [
+            "libbar.so.1",
+            ".dylibs/libbaz.dylib",
+            "bar.libs/data.txt",
+            "data.txt",
+        ] {
+            builder.add_python_package_resource(&package_resource(relative_name), None)?;
+        }
+
+        // Files in a `.libs` directory are added even though untyped files
+        // are not allowed. Other files are left out.
+        for path in [
+            "foo.libs/qux.dll",
+            "foo.libs/.load-order-foo-1.0",
+            "other/readme.txt",
+        ] {
+            builder.add_file_data(&File::new(path, vec![42]), None)?;
+        }
+
+        let resources = builder
+            .iter_resources()
+            .map(|(name, r)| (name.clone(), r.clone()))
+            .collect::<HashMap<_, _>>();
+
+        let foo = &resources["foo"];
+        let in_memory = foo.in_memory_resources.as_ref().unwrap();
+        let on_disk = foo.relative_path_package_resources.as_ref().unwrap();
+        assert_eq!(in_memory.keys().collect::<Vec<_>>(), vec!["data.txt"]);
+        assert_eq!(
+            on_disk.keys().collect::<Vec<_>>(),
+            vec![".dylibs/libbaz.dylib", "bar.libs/data.txt", "libbar.so.1"]
+        );
+
+        for path in ["foo.libs/qux.dll", "foo.libs/.load-order-foo-1.0"] {
+            let file = &resources[path];
+            assert!(file.file_data_embedded.is_none());
+            assert_eq!(
+                file.file_data_utf8_relative_path.as_ref().unwrap().0,
+                PathBuf::from("lib").join(path)
+            );
+        }
+
+        assert!(!resources.contains_key("other/readme.txt"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_shared_library_resources_without_fallback_stay_in_memory() -> Result<()> {
+        let options = StandalonePythonExecutableBuilderOptions {
+            extension_module_filter: Some(ExtensionModuleFilter::Minimal),
+            resources_location: Some(ConcreteResourceLocation::InMemory),
+            resources_location_fallback: Some(None),
+            ..StandalonePythonExecutableBuilderOptions::default()
+        };
+
+        let mut builder = options.new_builder()?;
+
+        builder.add_python_package_resource(
+            &PythonPackageResource {
+                leaf_package: "foo".to_string(),
+                relative_name: "libbar.dylib".to_string(),
+                data: FileData::Memory(vec![42]),
+                is_stdlib: false,
+                is_test: false,
+            },
+            None,
+        )?;
+
+        let foo = builder
+            .iter_resources()
+            .find(|(name, _)| *name == "foo")
+            .map(|(_, r)| r.clone())
+            .unwrap();
+        assert!(foo
+            .in_memory_resources
+            .unwrap()
+            .contains_key("libbar.dylib"));
+        assert!(foo.relative_path_package_resources.is_none());
+
+        Ok(())
+    }
+
+    fn delvewheel_test_modules() -> Vec<PythonModuleSource> {
+        [
+            (
+                "patched",
+                "def _delvewheel_patch_1_11_2():\n    import os\n\n\n_delvewheel_patch_1_11_2()\n",
+            ),
+            ("plain", "import os\n"),
+        ]
+        .into_iter()
+        .map(|(name, source)| PythonModuleSource {
+            name: name.to_string(),
+            source: FileData::Memory(source.as_bytes().to_vec()),
+            is_package: true,
+            cache_tag: "cpython-313".to_string(),
+            is_stdlib: false,
+            is_test: false,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn test_delvewheel_modules_placed_on_filesystem() -> Result<()> {
+        let options = StandalonePythonExecutableBuilderOptions {
+            extension_module_filter: Some(ExtensionModuleFilter::Minimal),
+            resources_location: Some(ConcreteResourceLocation::InMemory),
+            resources_location_fallback: Some(Some(ConcreteResourceLocation::RelativePath(
+                "lib".to_string(),
+            ))),
+            ..StandalonePythonExecutableBuilderOptions::default()
+        };
+
+        let mut builder = options.new_builder()?;
+
+        // Like a resource callback that sets add_source to False.
+        for module in delvewheel_test_modules() {
+            let mut add_context = builder
+                .python_packaging_policy()
+                .derive_add_collection_context(&(&module).into());
+            add_context.store_source = false;
+            builder.add_python_module_source(&module, Some(add_context))?;
+        }
+
+        let resources = builder
+            .iter_resources()
+            .map(|(name, r)| (name.clone(), r.clone()))
+            .collect::<HashMap<_, _>>();
+
+        // The patched module is stored on the filesystem with its source,
+        // which gives it a __file__.
+        let patched = &resources["patched"];
+        assert!(patched.in_memory_source.is_none());
+        assert_eq!(
+            patched.relative_path_module_source.as_ref().unwrap().0,
+            "lib"
+        );
+
+        let plain = &resources["plain"];
+        assert!(plain.relative_path_module_source.is_none());
+        assert!(plain.in_memory_source.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_delvewheel_modules_without_fallback_stay_in_memory() -> Result<()> {
+        let options = StandalonePythonExecutableBuilderOptions {
+            extension_module_filter: Some(ExtensionModuleFilter::Minimal),
+            resources_location: Some(ConcreteResourceLocation::InMemory),
+            resources_location_fallback: Some(None),
+            ..StandalonePythonExecutableBuilderOptions::default()
+        };
+
+        let mut builder = options.new_builder()?;
+
+        for module in delvewheel_test_modules() {
+            builder.add_python_module_source(&module, None)?;
+        }
+
+        let patched = builder
+            .iter_resources()
+            .find(|(name, _)| *name == "patched")
+            .map(|(_, r)| r.clone())
+            .unwrap();
+        assert!(patched.in_memory_source.is_some());
+        assert!(patched.relative_path_module_source.is_none());
+
+        Ok(())
+    }
+
+    #[test]
     fn test_linux_musl_distribution_dynamic() {
         let options = StandalonePythonExecutableBuilderOptions {
             target_triple: "x86_64-unknown-linux-musl".to_string(),
@@ -2531,13 +2899,12 @@ pub mod tests {
 
         // (target triple, Python version, OpenSSL DLL name infix).
         //
-        // Python 3.10 ships OpenSSL 1.1, later versions OpenSSL 3. The
-        // aarch64 distributions start at 3.11 and their PYTHON.json omits
-        // the OpenSSL DLLs, which PyOxidizer fills in.
+        // The PYTHON.json of the aarch64 distributions omits the OpenSSL
+        // DLLs, which PyOxidizer fills in.
         let targets = [
-            ("i686-pc-windows-msvc", "3.10", "-1_1"),
-            ("x86_64-pc-windows-msvc", "3.10", "-1_1-x64"),
-            ("x86_64-pc-windows-msvc", "3.13", "-3-x64"),
+            ("i686-pc-windows-msvc", "3.11", "-3"),
+            ("x86_64-pc-windows-msvc", "3.11", "-3-x64"),
+            ("x86_64-pc-windows-msvc", "3.15", "-3-x64"),
             ("aarch64-pc-windows-msvc", "3.11", "-3-arm64"),
         ];
 
@@ -2755,6 +3122,51 @@ pub mod tests {
     }
 
     #[test]
+    fn test_importer_supports_in_memory_shared_library_loading() {
+        for version in ["3.9", "3.10", "3.11", "3.12"] {
+            assert!(importer_supports_in_memory_shared_library_loading(version));
+        }
+
+        for version in ["3.13", "3.14", "3.15", "4.0", "", "3", "invalid"] {
+            assert!(!importer_supports_in_memory_shared_library_loading(version));
+        }
+    }
+
+    #[test]
+    fn test_windows_dynamic_extension_in_memory_unsupported_python_version() -> Result<()> {
+        for python_version in ["3.13", "3.14", "3.15"] {
+            for target_triple in WINDOWS_TARGET_TRIPLES.iter() {
+                let options = StandalonePythonExecutableBuilderOptions {
+                    target_triple: target_triple.to_string(),
+                    distribution_version: Some(python_version.to_string()),
+                    distribution_flavor: DistributionFlavor::StandaloneDynamic,
+                    extension_module_filter: Some(ExtensionModuleFilter::Minimal),
+                    libpython_link_mode: BinaryLibpythonLinkMode::Dynamic,
+                    resources_location: Some(ConcreteResourceLocation::InMemory),
+                    resources_location_fallback: Some(Some(
+                        ConcreteResourceLocation::RelativePath("prefix_policy".to_string()),
+                    )),
+                    allow_in_memory_shared_library_loading: Some(true),
+                    ..StandalonePythonExecutableBuilderOptions::default()
+                };
+
+                let mut builder = options.new_builder()?;
+
+                // In-memory loading is requested but not supported, so the
+                // fallback location is used.
+                builder.add_python_extension_module(&EXTENSION_MODULE_SHARED_LIBRARY_ONLY, None)?;
+                assert_extension_shared_library(
+                    &builder,
+                    &EXTENSION_MODULE_SHARED_LIBRARY_ONLY,
+                    ConcreteResourceLocation::RelativePath("prefix_policy".to_string()),
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
     fn test_windows_dynamic_extension_prefer_in_memory() -> Result<()> {
         for target_triple in WINDOWS_TARGET_TRIPLES.iter() {
             let options = StandalonePythonExecutableBuilderOptions {
@@ -2829,7 +3241,7 @@ pub mod tests {
         // metadata from the build.
         let options = StandalonePythonExecutableBuilderOptions {
             target_triple: "x86_64-unknown-linux-gnu".to_string(),
-            distribution_version: Some("3.10".into()),
+            distribution_version: Some("3.11".into()),
             extension_module_filter: Some(ExtensionModuleFilter::All),
             resources_location: Some(ConcreteResourceLocation::InMemory),
             ..StandalonePythonExecutableBuilderOptions::default()
@@ -2870,7 +3282,7 @@ pub mod tests {
             &PythonExtensionModule {
                 name: "yaml._yaml".to_string(),
                 init_fn: Some("PyInit__yaml".to_string()),
-                extension_file_suffix: ".cpython-310-x86_64-linux-gnu.so".to_string(),
+                extension_file_suffix: ".cpython-311-x86_64-linux-gnu.so".to_string(),
                 shared_library: None,
                 object_file_data: vec![],
                 is_package: false,

@@ -16,6 +16,39 @@ Next
 
 (Not yet released)
 
+* Wheels are now built for Python 3.15.
+* ``OxidizedResourceCollector.oxidize()`` no longer crashes Python 3.15
+  when the temporary directory it uses cannot be removed. The error of the
+  cleanup was not set when it was reported as an unraisable exception.
+* ``OxidizedFinder.index_interpreter_frozen_modules()`` indexes
+  ``linecache``, which Python 3.15 freezes.
+* :py:class:`OxidizedResourceReader` now implements ``files()``, returning a
+  new :py:class:`OxidizedResourceTraversable` that implements
+  ``importlib.resources.abc.Traversable`` for package resources.
+  Previously, ``importlib.resources`` fell back to its own compatibility
+  wrapper, whose ``read_text()`` does not accept ``errors``. Since Python
+  3.13, ``importlib.resources.read_text()`` always passes ``errors`` to
+  ``Traversable.read_text()``, so every call to it failed with
+  ``TypeError: Traversable.read_text() got an unexpected keyword argument
+  'errors'`` for resources loaded by ``oxidized_importer``. Traversing into
+  sub-directories and child packages via ``joinpath()`` and ``/`` is
+  supported, and ``iterdir()`` now lists resource sub-directories and child
+  packages instead of every resource path in the package.
+* Package resources stored in a filesystem-relative location are now
+  returned as ``pathlib.Path`` instances by
+  :py:meth:`OxidizedResourceTraversable.joinpath`, the ``/`` operator and
+  :py:meth:`OxidizedResourceTraversable.iterdir`.
+  ``importlib.resources.as_file()`` used to copy such resources to a
+  temporary file. Code that loads a bundled shared library this way, such
+  as ``libusb_package``, received a new temporary copy on every start. It
+  now gets the installed file.
+  :py:meth:`OxidizedResourceReader.resource_path` returns the path of these
+  resources instead of always raising ``FileNotFoundError``.
+* Importing an extension module indexed for in-memory loading on Windows
+  with Python 3.13 or newer now raises ``ImportError`` instead of
+  panicking. See :ref:`oxidized_importer_windows_in_memory_extensions`
+  for why this is not supported and how support could be restored.
+
 0.10.0
 ------
 
@@ -24,7 +57,8 @@ Released 2025-10-05
 * PyO3 upgraded from 0.17 to 0.25.1.
 * Added support for Python versions up to and including 3.12.
 * Disable in-memory extension import for Python 3.13 on Windows until
-  we can make it work again.
+  we can make it work again. See
+  :ref:`oxidized_importer_windows_in_memory_extensions` for details.
 
 0.9.0
 -----

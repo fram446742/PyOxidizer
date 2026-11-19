@@ -33,6 +33,177 @@ Next
 
 (Not yet released)
 
+Backwards Compatibility Notes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* Support for Python 3.10 has been removed, as python-build-standalone no
+  longer publishes distributions for it.
+* The default Python version is now 3.11 instead of 3.10.
+* The minimum Rust version has been changed from 1.95 to 1.99. The
+  ``pgo+lto`` distributions of python-build-standalone 20261110 contain LLVM
+  23 bitcode. Rust 1.99 is the first release whose bundled LLVM can read it.
+
+New Features
+^^^^^^^^^^^^
+
+* Support for Python 3.15 has been added.
+* Default Python distributions upgraded from python-build-standalone
+  20261003 to 20261110. This brings CPython 3.11.18, 3.12.16, 3.13.18,
+  3.14.10 and 3.15.2.
+
+Bug Fixes
+^^^^^^^^^
+
+* Python 3.15 distributions built with the experimental JIT define
+  ``_PyJIT_Entry`` in a separate shim object. python-build-standalone does
+  not list it among the object files of libpython, and linking failed with
+  an undefined symbol. The objects named by the ``JIT_OBJS`` configuration
+  variable are now taken from the static libpython of the distribution when
+  they are missing.
+* The bytecode compiler accepts marshal format 6, used by Python 3.15.
+* Shared libraries whose file names end in an extension module suffix are no
+  longer collected as extension modules unless Python could import them by
+  that name. On Linux, ``.so`` is such a suffix. In 0.131.0 the libraries
+  that auditwheel bundles in ``numpy.libs`` were installed to
+  ``numpy/libs`` instead. NumPy failed to import because its extension
+  modules look for these libraries in ``numpy.libs``.
+
+0.131.0
+-------
+
+Released 2026-11-13
+
+Bug Fixes
+^^^^^^^^^
+
+* A package whose code is stored on the filesystem no longer gets an empty
+  module in memory when some of its submodules are stored in memory. The
+  importer prefers code in memory, and the package was imported as an empty
+  module. In 0.130.0 this broke NumPy on Windows. Its ``__init__.py`` is
+  placed on the filesystem because of its delvewheel patch, and the rest of
+  the package stays in memory.
+* ``OxidizedFinder`` can import modules whose only code is bytecode on the
+  filesystem when the interpreter runs with optimization level 1 or 2.
+  Before, these modules could only be imported at optimization level 0.
+
+0.130.0
+-------
+
+Released 2026-11-12
+
+New Features
+^^^^^^^^^^^^
+
+* :py:class:`File` has a ``name`` attribute, an alias of ``path``. Every
+  resource passed to a resource callback now has a ``name``. Callbacks no
+  longer need to handle :py:class:`File` resources separately when matching
+  resources by name.
+* Modules patched by delvewheel, such as ``numpy/__init__.py`` in the Windows
+  wheels of NumPy, are placed on the filesystem with their source. The patch
+  reads ``__file__`` to find the bundled DLLs, and ``__file__`` is not set
+  for modules embedded in memory. The module is placed at
+  :py:attr:`PythonPackagingPolicy.resources_location_fallback` if it is a
+  ``filesystem-relative`` location. Otherwise a warning is printed. The
+  other modules of the package can stay in memory.
+
+0.129.0
+-------
+
+Released 2026-11-12
+
+Backwards Compatibility Notes
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* Resource callbacks can receive :py:class:`File` resources even if
+  :py:attr:`PythonPackagingPolicy.allow_files` is ``False``. Files in
+  ``<name>.libs`` directories of wheels are now always emitted as
+  :py:class:`File` resources (see below). A :py:class:`File` has a ``path``
+  attribute but no ``name`` or ``package``. Callbacks that read these
+  attributes without checking the type of the resource fail with an error
+  such as ``Cannot .name on type File``. Check ``type(resource)`` or use
+  ``getattr()`` and ``hasattr()`` to handle these resources. 0.130.0 adds
+  ``name`` to :py:class:`File`.
+
+New Features
+^^^^^^^^^^^^
+
+* The ``__file__`` warning printed when building now distinguishes between
+  standard library modules and other modules. A new
+  :py:attr:`PythonPackagingPolicy.dunder_file_allowed_packages` attribute
+  lists packages known to work without ``__file__``. If only standard library
+  modules and modules in allowed packages refer to ``__file__``, a note with
+  their counts is printed instead of a warning. Otherwise the warning lists
+  every other affected module, and in GitHub Actions it is also emitted as an
+  annotation on the job.
+* The ``__file__`` check now compiles each candidate module with the target
+  Python interpreter and inspects the bytecode. Only code that reads a name
+  or attribute called ``__file__`` is reported. Mentions in comments and
+  string literals, such as ``getattr(module, "__file__", None)``, and
+  assignments to ``__file__`` are ignored. Previously any occurrence of
+  ``__file__`` in the source was reported.
+* New :py:attr:`PythonPackagingPolicy.excluded_packages` attribute. It lists
+  packages whose resources are left out of the build.
+* New :py:attr:`PythonPackagingPolicy.test_package_names` attribute. It marks
+  the resources of packages with these names as tests, which extends
+  :py:attr:`PythonPackagingPolicy.include_test` beyond the standard library.
+* New :py:attr:`PythonPackagingPolicy.filesystem_packages` and
+  :py:attr:`PythonPackagingPolicy.filesystem_packages_location` attributes.
+  The resources of the listed packages are placed on the filesystem, with
+  the source code of their modules.
+
+Bug Fixes
+^^^^^^^^^
+
+* Shared libraries (``.dll``, ``.dylib``, ``.so`` and versioned ``.so.N``
+  files) stored as :py:class:`PythonPackageResource` or :py:class:`File`
+  resources are no longer embedded in memory, where nothing can load them.
+  They are placed at
+  :py:attr:`PythonPackagingPolicy.resources_location_fallback` instead if it
+  is a ``filesystem-relative`` location. Otherwise a warning is printed.
+  Previously, libraries bundled in wheels, such as ``numpy/.dylibs`` or
+  ``libusb_package``, had to be moved to the filesystem by a resource
+  callback.
+* Files in ``<name>.libs`` directories, where auditwheel and delvewheel put
+  the shared libraries of a wheel, are no longer dropped. They are added as
+  :py:class:`File` resources even if
+  :py:attr:`PythonPackagingPolicy.allow_files` is ``False``, and they are
+  placed on the filesystem like other shared libraries. Previously, files
+  in ``numpy.libs`` and similar directories were silently left out unless
+  file resources were enabled.
+* Setting :py:attr:`PythonPackagingPolicy.include_distribution_sources` to
+  ``False`` no longer sets ``add_include`` to ``False`` on every
+  :py:class:`PythonModuleSource`. Previously this excluded all Python modules
+  from the build, including bytecode, whether or not they came from the
+  Python distribution. Now the setting only controls whether the source code
+  of standard library modules is stored, as documented.
+
+0.128.0
+-------
+
+Released 2026-11-05
+
+Bug Fixes
+^^^^^^^^^
+
+* ``oxidized_importer.OxidizedResourceReader`` now implements ``files()``,
+  returning a new ``OxidizedResourceTraversable`` that implements
+  ``importlib.resources.abc.Traversable`` for package resources.
+  Previously, ``importlib.resources`` fell back to its own compatibility
+  wrapper, whose ``read_text()`` does not accept ``errors``. Since Python
+  3.13, ``importlib.resources.read_text()`` always passes ``errors`` to
+  ``Traversable.read_text()``, so every call to it failed with
+  ``TypeError: Traversable.read_text() got an unexpected keyword argument
+  'errors'`` for resources loaded by ``oxidized_importer``. Traversing into
+  sub-directories and child packages via ``joinpath()`` and ``/`` is
+  supported, and ``iterdir()`` now lists resource sub-directories and child
+  packages instead of every resource path in the package.
+* Extension modules are no longer placed in memory on Windows with Python
+  3.13 or newer when ``PythonPackagingPolicy.allow_in_memory_shared_library_loading``
+  is enabled. ``oxidized_importer`` cannot load them from memory on these
+  versions, so such binaries failed when importing the extension module.
+  A warning is logged and the policy's fallback resources location is
+  used instead.
+
 0.127.0
 -------
 

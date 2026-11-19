@@ -12,13 +12,13 @@ Scanning the filesystem for Python resources.
 
 use {
     crate::{
-        module_util::{is_package_from_path, PythonModuleSuffixes},
+        module_util::{is_module_name_component, is_package_from_path, PythonModuleSuffixes},
         package_metadata::PythonPackageMetadata,
         resource::{
-            BytecodeOptimizationLevel, PythonEggFile, PythonExtensionModule, PythonModuleBytecode,
-            PythonModuleSource, PythonPackageDistributionResource,
-            PythonPackageDistributionResourceFlavor, PythonPackageResource, PythonPathExtension,
-            PythonResource,
+            is_in_bundled_libraries_directory, BytecodeOptimizationLevel, PythonEggFile,
+            PythonExtensionModule, PythonModuleBytecode, PythonModuleSource,
+            PythonPackageDistributionResource, PythonPackageDistributionResourceFlavor,
+            PythonPackageResource, PythonPathExtension, PythonResource,
         },
     },
     anyhow::{Context, Result},
@@ -327,6 +327,18 @@ impl<'a> PythonResourceIterator<'a> {
                 let mut package = itertools::join(package_parts, ".");
 
                 let module_name = &file_name[0..file_name.len() - ext_suffix.len()];
+
+                // A file that Python could not import is not an extension
+                // module, even with an extension suffix. Shared libraries in
+                // the `.libs` directories of auditwheel are an example. They
+                // are handled as resources or files below.
+                if !package_parts
+                    .iter()
+                    .chain(std::iter::once(&module_name))
+                    .all(|part| is_module_name_component(part))
+                {
+                    continue;
+                }
 
                 let mut full_module_name: Vec<&str> = package_parts.to_vec();
 
@@ -668,8 +680,25 @@ impl<'a> Iterator for PythonResourceIterator<'a> {
                     (None, None)
                 };
 
-            // Resources without a resolved package are not legal.
+            // Resources without a resolved package are not legal. Bundled
+            // shared libraries are the exception, because extension modules
+            // need them. They are emitted as files even when files are not
+            // requested. If files are requested, every path was emitted as a
+            // file already.
             if leaf_package.is_none() {
+                let relative_path = resource.relative_path.to_string_lossy();
+
+                if !self.emit_files && is_in_bundled_libraries_directory(&relative_path) {
+                    return Some(Ok(File::new(
+                        resource.relative_path.clone(),
+                        FileEntry::new_from_data(
+                            self.resolve_file_data(&resource.full_path),
+                            self.resolve_is_executable(&resource.full_path),
+                        ),
+                    )
+                    .into()));
+                }
+
                 continue;
             }
 
@@ -1497,6 +1526,125 @@ mod tests {
             }
             .into()
         );
+
+        Ok(())
+    }
+
+    /// Files in a `.libs` directory next to a package are emitted as files.
+    #[test]
+    fn test_bundled_libraries_directory() -> Result<()> {
+        let td = tempfile::Builder::new()
+            .prefix("python-packaging-test")
+            .tempdir()?;
+        let tp = td.path();
+
+        let package_dir = tp.join("foo");
+        let libs_dir = tp.join("foo.libs");
+        create_dir_all(&package_dir)?;
+        create_dir_all(&libs_dir)?;
+        write(package_dir.join("__init__.py"), "")?;
+        write(libs_dir.join("libbar.so"), "bar")?;
+
+        let resources =
+            PythonResourceIterator::new(tp, DEFAULT_CACHE_TAG, &DEFAULT_SUFFIXES, false, true)?
+                .collect::<Result<Vec<_>>>()?;
+        assert!(resources.contains(
+            &File::new(
+                "foo.libs/libbar.so",
+                FileEntry::new_from_path(libs_dir.join("libbar.so"), false)
+            )
+            .into()
+        ));
+        assert_eq!(
+            resources
+                .iter()
+                .filter(|r| matches!(r, PythonResource::File(_)))
+                .count(),
+            1
+        );
+
+        // With files requested, the library is emitted once.
+        let files =
+            PythonResourceIterator::new(tp, DEFAULT_CACHE_TAG, &DEFAULT_SUFFIXES, true, true)?
+                .filter_map(|r| match r {
+                    Ok(PythonResource::File(f)) => Some(f.path().to_path_buf()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("foo").join("__init__.py"),
+                PathBuf::from("foo.libs").join("libbar.so")
+            ]
+        );
+
+        Ok(())
+    }
+
+    /// Shared libraries with an extension module suffix are not extension
+    /// modules if Python could not import them by name.
+    #[test]
+    fn test_shared_libraries_with_extension_suffix() -> Result<()> {
+        let td = tempfile::Builder::new()
+            .prefix("python-packaging-test")
+            .tempdir()?;
+        let tp = td.path();
+
+        let core_dir = tp.join("numpy").join("_core");
+        let libs_dir = tp.join("numpy.libs");
+        let usb_dir = tp.join("libusb_package");
+        create_dir_all(&core_dir)?;
+        create_dir_all(&libs_dir)?;
+        create_dir_all(&usb_dir)?;
+        write(tp.join("numpy").join("__init__.py"), "")?;
+        write(core_dir.join("__init__.py"), "")?;
+        write(
+            core_dir.join("_multiarray_umath.cpython-312-x86_64-linux-gnu.so"),
+            "umath",
+        )?;
+        write(
+            libs_dir.join("libscipy_openblas64_-f48b354e.so"),
+            "openblas",
+        )?;
+        write(usb_dir.join("__init__.py"), "")?;
+        write(usb_dir.join("libusb-1.0.so"), "usb")?;
+
+        let suffixes = PythonModuleSuffixes {
+            extension: vec![
+                ".cpython-312-x86_64-linux-gnu.so".to_string(),
+                ".abi3.so".to_string(),
+                ".so".to_string(),
+            ],
+            ..DEFAULT_SUFFIXES.clone()
+        };
+
+        let resources = PythonResourceIterator::new(tp, DEFAULT_CACHE_TAG, &suffixes, false, true)?
+            .collect::<Result<Vec<_>>>()?;
+
+        let extensions = resources
+            .iter()
+            .filter_map(|r| match r {
+                PythonResource::ExtensionModule(em) => Some(em.name.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(extensions, vec!["numpy._core._multiarray_umath"]);
+
+        assert!(resources.contains(
+            &File::new(
+                "numpy.libs/libscipy_openblas64_-f48b354e.so",
+                FileEntry::new_from_path(libs_dir.join("libscipy_openblas64_-f48b354e.so"), false)
+            )
+            .into()
+        ));
+
+        assert!(resources.iter().any(|r| matches!(
+            r,
+            PythonResource::PackageResource(resource)
+                if resource.leaf_package == "libusb_package"
+                    && resource.relative_name == "libusb-1.0.so"
+        )));
 
         Ok(())
     }
