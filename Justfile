@@ -754,3 +754,15 @@ _python_scripts_venv:
 sync:
   git fetch origin --prune
   git merge --ff-only origin/main
+
+# Rebase the upstream fixes onto the base fork's main and print the revision
+# to pin in pyoxide. Publish with --force-with-lease afterward.
+fixes-rebase:
+  #!/usr/bin/env bash
+  set -eo pipefail
+  git fetch origin --prune
+  git checkout fixes/upstream
+  git rebase origin/main
+  git log --oneline -3
+  echo "pin: $(git rev-parse HEAD)"
+  echo "publish: git push --force-with-lease myrepo fixes/upstream"
